@@ -1,0 +1,72 @@
+use protobuf
+
+fn main() {
+    // 1. Parse a .proto (proto3) schema
+    let schema = "
+syntax = \"proto3\";
+package demo.v1;
+
+enum Status {
+    STATUS_UNKNOWN = 0;
+    STATUS_ACTIVE = 1;
+    STATUS_ARCHIVED = 2;
+}
+
+// A user account record
+message User {
+    int64 id = 1;
+    string name = 2;
+    Status status = 3;
+    repeated int32 scores = 4;
+    map<string, int32> labels = 5;
+    optional string bio = 6;
+}
+"
+    let file = protobuf.parse_proto(schema) ! panic("Parse error at %{E.line}:%{E.column}: %{E.message}")
+    let user_desc = file.find_message("User") ?! panic("User message not found")
+
+    // 2. Encode & decode dynamically without codegen
+    let dyn = protobuf.DynamicMessage.new(user_desc, file)
+    dyn.set_int64("id", 42)
+    dyn.set_string("name", "Alice")
+    dyn.set_enum("status", 1)
+    dyn.set_list("scores", Array[protobuf.DynamicValue]{
+        protobuf.DynamicValue.from_int32(10),
+        protobuf.DynamicValue.from_int32(25),
+        protobuf.DynamicValue.from_int32(99)
+    })
+    dyn.set_map_entry("labels", protobuf.DynamicValue.from_string("tier"), protobuf.DynamicValue.from_int32(3))
+    dyn.set_string("bio", "Valk developer")
+
+    let wire = dyn.encode()
+    println("Encoded User into %{wire.bytes} bytes")
+
+    let decoded = protobuf.DynamicMessage.decode(user_desc, wire, file) ! panic("Decode failed: %{E.message}")
+    println("Decoded: id=%{decoded.get_int64("id")}, name=%{decoded.get_string("name")}, bio=%{decoded.get_string("bio")}")
+
+    // 3. Low-level Writer / Reader wire codec
+    let w = protobuf.Writer.new()
+    w.write_sint32(1, -123)
+    w.write_string(2, "hello wire")
+    w.write_packed_uint32(3, Array[u32]{ 1, 2, 3 })
+
+    let r = protobuf.Reader.new(w.into_bytes())
+    while true {
+        let tag = (r.next_tag() ! panic(E.message)) ?! break
+        let field_num, wt = tag
+        match field_num {
+            1 => println("Wire field 1 (sint32): %{r.read_sint32() ! panic(E.message)}")
+            2 => println("Wire field 2 (string): %{r.read_string() ! panic(E.message)}")
+            3 => {
+                let nums = r.read_packed_uint32() ! panic(E.message)
+                println("Wire field 3 (packed uint32): %{nums.length} items")
+            }
+            default => r.skip_field(wt) ! panic(E.message)
+        }
+    }
+
+    // 4. Generate clean typed Valk classes from the parsed .proto schema
+    let generated = protobuf.generate_valk(file)
+    println("\n--- Generated Valk code (%{generated.bytes} bytes) ---")
+    println(generated)
+}

@@ -1,0 +1,374 @@
+/// Field cardinality / presence label in a `.proto` message.
++ enum FieldLabel {
+    /// Implicit presence singular field (proto3 default).
+    none
+    /// Explicit presence `optional` field.
+    optional
+    /// Repeated field (`repeated`).
+    repeated
+}
+
+/// A `.proto` option entry (`name = value`).
++ class ProtoOption {
+    /// Option name (may include parenthesized custom option segments).
+    + name: String
+    /// Raw or unquoted option value representation.
+    + value: String
+}
+
+/// An inclusive reserved field-number range (`start` ..= `end`).
++ class ReservedRange {
+    /// First reserved number (inclusive).
+    + start: i32
+    /// Last reserved number (inclusive).
+    + end: i32
+}
+
+/// A `.proto` `import` declaration.
++ class ImportDescriptor {
+    /// Imported `.proto` path.
+    + path: String
+    /// True for `import public "..."`.
+    + is_public: bool (false)
+    /// True for `import weak "..."`.
+    + is_weak: bool (false)
+}
+
+/// A single value inside a `.proto` `enum`.
++ class EnumValueDescriptor {
+    /// Enum value identifier (e.g., `STATUS_OK`).
+    + name: String
+    /// Signed 32-bit wire number.
+    + number: i32
+    /// Inline value options (e.g., `[deprecated = true]`).
+    + options: Array[ProtoOption] (.{})
+    /// Leading documentation comment, if any.
+    + doc: String ("")
+}
+
+/// A parsed `.proto` `enum` definition.
++ class EnumDescriptor {
+    /// Unqualified enum name.
+    + name: String
+    /// Enum values in declaration order.
+    + values: Array[EnumValueDescriptor] (.{})
+    /// Enum-level options.
+    + options: Array[ProtoOption] (.{})
+    /// Reserved numeric ranges.
+    + reserved_ranges: Array[ReservedRange] (.{})
+    /// Reserved value names.
+    + reserved_names: Array[String] (.{})
+    /// True when `option allow_alias = true;` was declared.
+    + allow_alias: bool (false)
+    /// Leading documentation comment, if any.
+    + doc: String ("")
+
+    /// Finds the first enum value matching `number`, or returns `null`.
+    + fn value_by_number(number: i32) ?EnumValueDescriptor {
+        each this.values as v {
+            if v.number == number : return v
+        }
+        return null
+    }
+
+    /// Finds an enum value by `name`, or returns `null`.
+    + fn value_by_name(name: String) ?EnumValueDescriptor {
+        each this.values as v {
+            if v.name == name : return v
+        }
+        return null
+    }
+}
+
+/// A parsed field inside a `.proto` `message` or `oneof`.
++ class FieldDescriptor {
+    /// Field name.
+    + name: String
+    /// Field tag number (`1 ..= 536870911`).
+    + number: u32
+    /// Protobuf type name (scalar, enum, message, or `"map<K, V>"`).
+    + type_name: String
+    /// Field label (`none`, `optional`, or `repeated`).
+    + label: FieldLabel (FieldLabel.none)
+    /// True for `map<K, V>` fields.
+    + is_map: bool (false)
+    /// Map key scalar type when `is_map` is true.
+    + map_key_type: String ("")
+    /// Map value type when `is_map` is true.
+    + map_value_type: String ("")
+    /// Enclosing `oneof` name, or empty string if not part of a `oneof`.
+    + oneof_name: String ("")
+    /// Field-level options (e.g., `[packed = true]`, `[deprecated = true]`).
+    + options: Array[ProtoOption] (.{})
+    /// Leading documentation comment, if any.
+    + doc: String ("")
+
+    /// Returns true if this field is `repeated` (and not a map).
+    + get is_repeated: bool {
+        return this.label == FieldLabel.repeated && !this.is_map
+    }
+
+    /// Returns true if this field is marked `optional`.
+    + get is_optional: bool {
+        return this.label == FieldLabel.optional
+    }
+
+    /// Returns true if this field belongs to a `oneof`.
+    + get is_oneof: bool {
+        return this.oneof_name.bytes > 0
+    }
+
+    /// Returns true if this field has `[deprecated = true]`.
+    + get is_deprecated: bool {
+        let opt = this.get_option("deprecated")
+        return isset(opt) && opt == "true"
+    }
+
+    /// Returns true if this repeated field should be encoded packed (proto3 default for packable scalars unless `[packed = false]`).
+    + get is_packed: bool {
+        if !this.is_repeated : return false
+        let opt = this.get_option("packed")
+        if isset(opt) : return opt == "true"
+        return is_packable_scalar(this.type_name)
+    }
+
+    /// Looks up a field option by name, or returns `null`.
+    + fn get_option(name: String) ?String {
+        each this.options as opt {
+            if opt.name == name : return opt.value
+        }
+        return null
+    }
+}
+
+/// A parsed `oneof` group inside a `.proto` `message`.
++ class OneofDescriptor {
+    /// Oneof group name.
+    + name: String
+    /// Member fields belonging to this `oneof`.
+    + fields: Array[FieldDescriptor] (.{})
+    /// Oneof-level options.
+    + options: Array[ProtoOption] (.{})
+    /// Leading documentation comment, if any.
+    + doc: String ("")
+}
+
+/// A parsed `.proto` `message` definition.
++ class MessageDescriptor {
+    /// Unqualified message name.
+    + name: String
+    /// All fields declared in this message (including `oneof` member fields).
+    + fields: Array[FieldDescriptor] (.{})
+    /// `oneof` groups declared in this message.
+    + oneofs: Array[OneofDescriptor] (.{})
+    /// Nested `message` definitions.
+    + nested_messages: Array[MessageDescriptor] (.{})
+    /// Nested `enum` definitions.
+    + nested_enums: Array[EnumDescriptor] (.{})
+    /// Message-level options.
+    + options: Array[ProtoOption] (.{})
+    /// Reserved field number ranges.
+    + reserved_ranges: Array[ReservedRange] (.{})
+    /// Reserved field names.
+    + reserved_names: Array[String] (.{})
+    /// Leading documentation comment, if any.
+    + doc: String ("")
+
+    /// Finds a field by tag `number`, or returns `null`.
+    + fn field_by_number(number: u32) ?FieldDescriptor {
+        each this.fields as f {
+            if f.number == number : return f
+        }
+        return null
+    }
+
+    /// Finds a field by `name`, or returns `null`.
+    + fn field_by_name(name: String) ?FieldDescriptor {
+        each this.fields as f {
+            if f.name == name : return f
+        }
+        return null
+    }
+
+    /// Finds a nested message by direct or dotted relative `name`, or returns `null`.
+    + fn find_message(name: String) ?MessageDescriptor {
+        let dot = name.index_of_byte('.') ! {
+            each this.nested_messages as m {
+                if m.name == name : return m
+            }
+            return null
+        }
+        let head = name.range(0, dot)
+        let tail = name.range(dot + 1, name.bytes)
+        each this.nested_messages as m {
+            if m.name == head : return m.find_message(tail)
+        }
+        return null
+    }
+
+    /// Finds a nested enum by direct or dotted relative `name`, or returns `null`.
+    + fn find_enum(name: String) ?EnumDescriptor {
+        let dot = name.index_of_byte('.') ! {
+            each this.nested_enums as e {
+                if e.name == name : return e
+            }
+            return null
+        }
+        let head = name.range(0, dot)
+        let tail = name.range(dot + 1, name.bytes)
+        each this.nested_messages as m {
+            if m.name == head : return m.find_enum(tail)
+        }
+        return null
+    }
+
+    /// Looks up a message option by name, or returns `null`.
+    + fn get_option(name: String) ?String {
+        each this.options as opt {
+            if opt.name == name : return opt.value
+        }
+        return null
+    }
+}
+
+/// A parsed `rpc` method inside a `.proto` `service`.
++ class RpcDescriptor {
+    /// Method name.
+    + name: String
+    /// Request message type name.
+    + input_type: String
+    /// Response message type name.
+    + output_type: String
+    /// True if the request type is marked `stream`.
+    + client_streaming: bool (false)
+    /// True if the response type is marked `stream`.
+    + server_streaming: bool (false)
+    /// RPC-level options.
+    + options: Array[ProtoOption] (.{})
+    /// Leading documentation comment, if any.
+    + doc: String ("")
+}
+
+/// A parsed `.proto` `service` definition.
++ class ServiceDescriptor {
+    /// Service name.
+    + name: String
+    /// RPC methods in declaration order.
+    + methods: Array[RpcDescriptor] (.{})
+    /// Service-level options.
+    + options: Array[ProtoOption] (.{})
+    /// Leading documentation comment, if any.
+    + doc: String ("")
+}
+
+/// Root AST representing a parsed `.proto` file.
++ class FileDescriptor {
+    /// Declared syntax version (e.g., `"proto3"`).
+    + syntax: String ("proto3")
+    /// Declared `package` name, or empty string if omitted.
+    + package_name: String ("")
+    /// `import` statements.
+    + imports: Array[ImportDescriptor] (.{})
+    /// File-level `option` declarations.
+    + options: Array[ProtoOption] (.{})
+    /// Top-level `message` definitions.
+    + messages: Array[MessageDescriptor] (.{})
+    /// Top-level `enum` definitions.
+    + enums: Array[EnumDescriptor] (.{})
+    /// Top-level `service` definitions.
+    + services: Array[ServiceDescriptor] (.{})
+    /// Leading file-level documentation comment, if any.
+    + doc: String ("")
+
+    /// Finds a message by unqualified, dotted nested, or package-qualified name.
+    + fn find_message(name: String) ?MessageDescriptor {
+        let target = normalize_type_name(name, this.package_name)
+        let dot = target.index_of_byte('.') ! {
+            each this.messages as m {
+                if m.name == target : return m
+            }
+            return null
+        }
+        let head = target.range(0, dot)
+        let tail = target.range(dot + 1, target.bytes)
+        each this.messages as m {
+            if m.name == head : return m.find_message(tail)
+        }
+        return null
+    }
+
+    /// Finds an enum by unqualified, dotted nested, or package-qualified name.
+    + fn find_enum(name: String) ?EnumDescriptor {
+        let target = normalize_type_name(name, this.package_name)
+        let dot = target.index_of_byte('.') ! {
+            each this.enums as e {
+                if e.name == target : return e
+            }
+            return null
+        }
+        let head = target.range(0, dot)
+        let tail = target.range(dot + 1, target.bytes)
+        each this.messages as m {
+            if m.name == head : return m.find_enum(tail)
+        }
+        return null
+    }
+
+    /// Looks up a file-level option by name, or returns `null`.
+    + fn get_option(name: String) ?String {
+        each this.options as opt {
+            if opt.name == name : return opt.value
+        }
+        return null
+    }
+}
+
+/// Returns true if `type_name` is a built-in Protocol Buffers scalar type.
++ fn is_scalar_type(type_name: String) bool {
+    match type_name {
+        "double", "float", "int32", "int64", "uint32", "uint64",
+        "sint32", "sint64", "fixed32", "fixed64", "sfixed32", "sfixed64",
+        "bool", "string", "bytes" => return true
+        default => return false
+    }
+}
+
+/// Returns true if `type_name` is a scalar type that supports packed repeated encoding.
++ fn is_packable_scalar(type_name: String) bool {
+    match type_name {
+        "double", "float", "int32", "int64", "uint32", "uint64",
+        "sint32", "sint64", "fixed32", "fixed64", "sfixed32", "sfixed64",
+        "bool" => return true
+        default => return false
+    }
+}
+
+/// Returns true if `type_name` is a valid protobuf `map` key type.
++ fn is_valid_map_key_type(type_name: String) bool {
+    match type_name {
+        "int32", "int64", "uint32", "uint64", "sint32", "sint64",
+        "fixed32", "fixed64", "sfixed32", "sfixed64", "bool", "string" => return true
+        default => return false
+    }
+}
+
+/// Returns the wire type for a built-in scalar `type_name`, or `null` if non-scalar.
++ fn scalar_wire_type(type_name: String) ?WireType {
+    match type_name {
+        "int32", "int64", "uint32", "uint64", "sint32", "sint64", "bool" => return WireType.varint
+        "fixed64", "sfixed64", "double" => return WireType.fixed64
+        "fixed32", "sfixed32", "float" => return WireType.fixed32
+        "string", "bytes" => return WireType.len
+        default => return null
+    }
+}
+
+fn normalize_type_name(name: String, package_name: String) String {
+    let s = name
+    if s.starts_with(".") : s = s.range(1, s.bytes)
+    if package_name.bytes > 0 {
+        let prefix = package_name + "."
+        if s.starts_with(prefix) : s = s.range(prefix.bytes, s.bytes)
+    }
+    return s
+}

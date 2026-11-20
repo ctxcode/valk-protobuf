@@ -1,0 +1,32 @@
+/// Maximum nested submessage depth allowed when decoding.
++ value MAX_DEPTH (100)
+
+/// Thrown when encoding, decoding, or parsing Protocol Buffers data fails.
+///
+/// - `truncated`: unexpected end of input while reading a wire value or payload.
+/// - `varint_overflow`: a varint exceeded 10 bytes or overflowed 64 bits.
+/// - `invalid_wire_type`: an unsupported or invalid wire type was encountered.
+/// - `invalid_field_number`: a field number was 0 or exceeded the maximum (536,870,911).
+/// - `wire_type_mismatch`: the wire type in the stream did not match the expected field type.
+/// - `depth_limit`: nested submessages exceeded `MAX_DEPTH`.
+/// - `length_overflow`: a length-delimited payload exceeded the available input or size bounds.
+/// - `syntax_error`: invalid `.proto` schema syntax.
+/// - `unknown_type`: a referenced message or enum descriptor could not be resolved.
+/// - `invalid_value`: a value was incompatible with the target field type.
++ error Error (
+    truncated,
+    varint_overflow,
+    invalid_wire_type,
+    invalid_field_number,
+    wire_type_mismatch,
+    depth_limit,
+    length_overflow,
+    syntax_error,
+    unknown_type,
+    invalid_value
+) payload {
+    message: String
+    offset: uint (0)
+    line: uint (0)
+    column: uint (0)
+}

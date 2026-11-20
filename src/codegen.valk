@@ -1,0 +1,696 @@
+/// Configuration options for Valk code generation from a parsed `.proto` file.
++ class CodegenOptions {
+    /// Module name imported for the protobuf runtime (`use <protobuf_import>`).
+    + protobuf_import: String ("protobuf")
+    /// Emit `+` public visibility modifiers on generated types, fields, and methods.
+    + public_types: bool (true)
+    /// Emit the standard generated-file header comment at the top of output.
+    + emit_header: bool (true)
+}
+
+/// Generates idiomatic Valk 0.8.10 source code from a parsed `FileDescriptor`.
+///
+/// Emits:
+/// - `+ enum` definitions for top-level and nested protobuf enums, with `<Name>_from_proto(v: i32)` converters.
+/// - `+ class` definitions implementing `protobuf.ProtoMessage` (`encode_proto`, `to_proto_bytes`,
+///   `decode_proto`, `decode_proto_reader`, and `merge_proto_reader`).
++ fn generate_valk(file: FileDescriptor, options: ?CodegenOptions (null)) String {
+    let opts = options ?? CodegenOptions {}
+    let gen = ValkCodegen.new(file, opts)
+    return gen.generate()
+}
+
+class ValkCodegen {
+    file: FileDescriptor
+    opts: CodegenOptions
+    buf: ByteBuffer
+    msg_names: Map[String] (.{})
+    enum_names: Map[String] (.{})
+    enum_defaults: Map[String] (.{})
+    enum_descs: Map[EnumDescriptor] (.{})
+
+    static fn new(file: FileDescriptor, opts: CodegenOptions) ValkCodegen {
+        let g = ValkCodegen {
+            file: file
+            opts: opts
+            buf: ByteBuffer.new(2048)
+        }
+        g.index_file()
+        return g
+    }
+
+    fn pub_prefix() String {
+        return this.opts.public_types ? "+ " : ""
+    }
+
+    fn pb() String {
+        return this.opts.protobuf_import
+    }
+
+    fn line(text: String ("")) {
+        if text.bytes > 0 : this.buf.write(text)
+        this.buf.write_byte('\n')
+    }
+
+    fn emit_doc(doc: String, indent: String) {
+        if doc.bytes == 0 : return
+        let lines = doc.split("\n")
+        each lines as l {
+            let trimmed = l.trim()
+            if trimmed.bytes > 0 {
+                this.line("%{indent}/// %{trimmed}")
+            } else {
+                this.line("%{indent}///")
+            }
+        }
+    }
+
+    fn index_file() {
+        each this.file.enums as e {
+            this.index_enum(e, "", "")
+        }
+        each this.file.messages as m {
+            this.index_message(m, "", "")
+        }
+    }
+
+    fn index_enum(e: EnumDescriptor, proto_prefix: String, valk_prefix: String) {
+        let proto_path = proto_prefix.bytes > 0 ? "%{proto_prefix}.%{e.name}" : e.name
+        let valk_name = valk_prefix.bytes > 0 ? "%{valk_prefix}_%{e.name}" : e.name
+        this.enum_names.set(proto_path, valk_name)
+        this.enum_descs.set(valk_name, e)
+        let first_variant = "UNKNOWN"
+        if e.values.length > 0 {
+            let first = e.values.get(0) !? EnumValueDescriptor { name: "UNKNOWN", number: 0 }
+            first_variant = escape_valk_ident(first.name)
+        }
+        this.enum_defaults.set(valk_name, first_variant)
+    }
+
+    fn index_message(m: MessageDescriptor, proto_prefix: String, valk_prefix: String) {
+        let proto_path = proto_prefix.bytes > 0 ? "%{proto_prefix}.%{m.name}" : m.name
+        let valk_name = valk_prefix.bytes > 0 ? "%{valk_prefix}_%{m.name}" : m.name
+        this.msg_names.set(proto_path, valk_name)
+        each m.nested_enums as e {
+            this.index_enum(e, proto_path, valk_name)
+        }
+        each m.nested_messages as nested {
+            this.index_message(nested, proto_path, valk_name)
+        }
+    }
+
+    fn resolve_proto_type(type_name: String, scope: Array[String]) (String, bool) {
+        // Returns (valk_type_name, is_enum)
+        let norm = normalize_type_name(type_name, this.file.package_name)
+
+        // Search from innermost enclosing message scope outward
+        let depth = scope.length
+        while depth > 0 {
+            let prefix = join_scope(scope, depth)
+            let candidate = "%{prefix}.%{norm}"
+            if this.msg_names.has(candidate) {
+                let vn = this.msg_names.get(candidate) !? norm
+                return (vn, false)
+            }
+            if this.enum_names.has(candidate) {
+                let vn = this.enum_names.get(candidate) !? norm
+                return (vn, true)
+            }
+            depth -= 1
+        }
+
+        if this.msg_names.has(norm) {
+            let vn = this.msg_names.get(norm) !? norm
+            return (vn, false)
+        }
+        if this.enum_names.has(norm) {
+            let vn = this.enum_names.get(norm) !? norm
+            return (vn, true)
+        }
+
+        // Fallback for external/imported types: convert dotted path to underscore name
+        return (norm.replace(".", "_"), false)
+    }
+
+    fn scalar_valk_type(proto_type: String) String {
+        match proto_type {
+            "int32", "sint32", "sfixed32" => return "i32"
+            "int64", "sint64", "sfixed64" => return "i64"
+            "uint32", "fixed32" => return "u32"
+            "uint64", "fixed64" => return "u64"
+            "float" => return "f32"
+            "double" => return "f64"
+            "bool" => return "bool"
+            "string", "bytes" => return "String"
+            default => return "i32"
+        }
+    }
+
+    fn scalar_default_expr(proto_type: String) String {
+        match proto_type {
+            "int32", "sint32", "sfixed32", "int64", "sint64", "sfixed64",
+            "uint32", "fixed32", "uint64", "fixed64" => return "0"
+            "float", "double" => return "0.0"
+            "bool" => return "false"
+            "string", "bytes" => return "\"\""
+            default => return "0"
+        }
+    }
+
+    fn scalar_writer_method(proto_type: String) String {
+        match proto_type {
+            "int32" => return "write_int32"
+            "int64" => return "write_int64"
+            "uint32" => return "write_uint32"
+            "uint64" => return "write_uint64"
+            "sint32" => return "write_sint32"
+            "sint64" => return "write_sint64"
+            "fixed32" => return "write_fixed32"
+            "sfixed32" => return "write_sfixed32"
+            "fixed64" => return "write_fixed64"
+            "sfixed64" => return "write_sfixed64"
+            "float" => return "write_float"
+            "double" => return "write_double"
+            "bool" => return "write_bool"
+            "string" => return "write_string"
+            "bytes" => return "write_bytes"
+            default => return "write_int32"
+        }
+    }
+
+    fn scalar_packed_writer_method(proto_type: String) String {
+        match proto_type {
+            "int32" => return "write_packed_int32"
+            "int64" => return "write_packed_int64"
+            "uint32" => return "write_packed_uint32"
+            "uint64" => return "write_packed_uint64"
+            "sint32" => return "write_packed_sint32"
+            "sint64" => return "write_packed_sint64"
+            "fixed32" => return "write_packed_fixed32"
+            "sfixed32" => return "write_packed_sfixed32"
+            "fixed64" => return "write_packed_fixed64"
+            "sfixed64" => return "write_packed_sfixed64"
+            "float" => return "write_packed_float"
+            "double" => return "write_packed_double"
+            "bool" => return "write_packed_bool"
+            default => return "write_packed_int32"
+        }
+    }
+
+    fn scalar_reader_method(proto_type: String) String {
+        match proto_type {
+            "int32" => return "read_int32"
+            "int64" => return "read_int64"
+            "uint32" => return "read_uint32"
+            "uint64" => return "read_uint64"
+            "sint32" => return "read_sint32"
+            "sint64" => return "read_sint64"
+            "fixed32" => return "read_fixed32"
+            "sfixed32" => return "read_sfixed32"
+            "fixed64" => return "read_fixed64"
+            "sfixed64" => return "read_sfixed64"
+            "float" => return "read_float"
+            "double" => return "read_double"
+            "bool" => return "read_bool"
+            "string" => return "read_string"
+            "bytes" => return "read_bytes"
+            default => return "read_int32"
+        }
+    }
+
+    fn scalar_packed_reader_into_method(proto_type: String) String {
+        match proto_type {
+            "int32" => return "read_packed_int32_into"
+            "int64" => return "read_packed_int64_into"
+            "uint32" => return "read_packed_uint32_into"
+            "uint64" => return "read_packed_uint64_into"
+            "sint32" => return "read_packed_sint32_into"
+            "sint64" => return "read_packed_sint64_into"
+            "fixed32" => return "read_packed_fixed32_into"
+            "sfixed32" => return "read_packed_sfixed32_into"
+            "fixed64" => return "read_packed_fixed64_into"
+            "sfixed64" => return "read_packed_sfixed64_into"
+            "float" => return "read_packed_float_into"
+            "double" => return "read_packed_double_into"
+            "bool" => return "read_packed_bool_into"
+            default => return "read_packed_int32_into"
+        }
+    }
+
+    fn non_zero_condition(proto_type: String, expr: String) String {
+        match proto_type {
+            "float" => return "%{this.pb()}.f32_to_bits(%{expr}) != 0"
+            "double" => return "%{this.pb()}.f64_to_bits(%{expr}) != 0"
+            "bool" => return expr
+            "string", "bytes" => return "%{expr}.bytes > 0"
+            default => return "%{expr} != 0"
+        }
+    }
+
+    fn generate() String {
+        if this.opts.emit_header {
+            this.line("// Code generated by valk-protobuf. DO NOT EDIT.")
+            if this.file.package_name.bytes > 0 {
+                this.line("// Source package: %{this.file.package_name}")
+            }
+            this.line()
+        }
+
+        if this.file.messages.length > 0 {
+            this.line("use %{this.pb()}")
+            this.line()
+        }
+
+        let scope = Array[String]{}
+        each this.file.enums as e {
+            this.emit_enum(e, "")
+        }
+        each this.file.messages as m {
+            this.emit_message_tree(m, scope, "")
+        }
+
+        return this.buf.to_string()
+    }
+
+    fn emit_enum(e: EnumDescriptor, valk_prefix: String) {
+        let name = valk_prefix.bytes > 0 ? "%{valk_prefix}_%{e.name}" : e.name
+        let pub_p = this.pub_prefix()
+
+        this.emit_doc(e.doc, "")
+        this.line("%{pub_p}enum %{name}: i32 {")
+        let emitted_vals = Array[EnumValueDescriptor]{}
+        each e.values as v {
+            this.emit_doc(v.doc, "    ")
+            let vname = escape_valk_ident(v.name)
+            this.line("    %{vname} (%{v.number})")
+            emitted_vals.append(v)
+        }
+        if emitted_vals.length == 0 {
+            this.line("    UNKNOWN (0)")
+        }
+        this.line("}")
+        this.line()
+
+        let def_var = this.enum_defaults.get(name) !? "UNKNOWN"
+        this.line("/// Converts a protobuf wire enum value into `%{name}`.")
+        this.line("%{pub_p}fn %{name}_from_proto(v: i32) %{name} {")
+        this.line("    match v {")
+        let seen_nums = Array[i32]{}
+        each emitted_vals as v {
+            if seen_nums.contains(v.number) : continue
+            seen_nums.append(v.number)
+            let vname = escape_valk_ident(v.name)
+            this.line("        %{v.number} => { return %{name}.%{vname} }")
+        }
+        this.line("        default => { return %{name}.%{def_var} }")
+        this.line("    }")
+        this.line("}")
+        this.line()
+    }
+
+    fn emit_message_tree(m: MessageDescriptor, parent_scope: Array[String], valk_prefix: String) {
+        let valk_name = valk_prefix.bytes > 0 ? "%{valk_prefix}_%{m.name}" : m.name
+        let scope = Array[String]{}
+        each parent_scope as s : scope.append(s)
+        scope.append(m.name)
+
+        // Emit nested enums and nested messages first so references read top-to-bottom cleanly
+        each m.nested_enums as ne {
+            this.emit_enum(ne, valk_name)
+        }
+        each m.nested_messages as nm {
+            this.emit_message_tree(nm, scope, valk_name)
+        }
+
+        this.emit_message(m, valk_name, scope)
+    }
+
+    fn emit_message(m: MessageDescriptor, valk_name: String, scope: Array[String]) {
+        let pub_p = this.pub_prefix()
+        let pb = this.pb()
+
+        this.emit_doc(m.doc, "")
+        this.line("%{pub_p}class %{valk_name} is %{pb}.ProtoMessage {")
+
+        // Fields
+        each m.fields as f {
+            this.emit_doc(f.doc, "    ")
+            let fname = escape_valk_ident(f.name)
+            if f.is_map {
+                let vtype = this.map_value_valk_type(f.map_value_type, scope)
+                if f.map_key_type == "string" {
+                    this.line("    %{pub_p}%{fname}: Map[%{vtype}] (.{})")
+                } else {
+                    let ktype = this.scalar_valk_type(f.map_key_type)
+                    this.line("    %{pub_p}%{fname}: HashMap[%{ktype}, %{vtype}] (.{})")
+                }
+            } else if f.is_repeated {
+                let elem_type = this.elem_valk_type(f.type_name, scope)
+                this.line("    %{pub_p}%{fname}: Array[%{elem_type}] (.{})")
+            } else if f.is_optional || f.is_oneof {
+                let base_type = this.elem_valk_type(f.type_name, scope)
+                this.line("    %{pub_p}%{fname}: ?%{base_type} (null)")
+            } else if is_scalar_type(f.type_name) {
+                let vtype = this.scalar_valk_type(f.type_name)
+                let def = this.scalar_default_expr(f.type_name)
+                this.line("    %{pub_p}%{fname}: %{vtype} (%{def})")
+            } else {
+                let resolved, is_enum = this.resolve_proto_type(f.type_name, scope)
+                if is_enum {
+                    let def_var = this.enum_defaults.get(resolved) !? "UNKNOWN"
+                    this.line("    %{pub_p}%{fname}: %{resolved} (%{resolved}.%{def_var})")
+                } else {
+                    this.line("    %{pub_p}%{fname}: ?%{resolved} (null)")
+                }
+            }
+        }
+
+        if m.fields.length > 0 : this.line()
+
+        // encode_proto
+        this.line("    /// Encodes this message's fields into `w`.")
+        this.line("    %{pub_p}fn encode_proto(w: %{pb}.Writer) {")
+        if m.fields.length == 0 {
+            this.line("        if w.length == 0 : return")
+        } else {
+            each m.fields as f {
+                this.emit_encode_field(f, scope)
+            }
+        }
+        this.line("    }")
+        this.line()
+
+        // to_proto_bytes
+        this.line("    /// Encodes this message into Protocol Buffers wire bytes.")
+        this.line("    %{pub_p}fn to_proto_bytes() String {")
+        this.line("        let w = %{pb}.Writer.new(128)")
+        this.line("        this.encode_proto(w)")
+        this.line("        return w.into_bytes()")
+        this.line("    }")
+        this.line()
+
+        // merge_proto_reader
+        this.line("    /// Merges protobuf wire fields from `r` into this message.")
+        this.line("    %{pub_p}fn merge_proto_reader(r: %{pb}.Reader) !%{pb}.Error {")
+        this.line("        while true {")
+        this.line("            let tag = (r.next_tag() !>) ?! break")
+        if m.fields.length == 0 {
+            this.line("            let _, wt = tag")
+            this.line("            r.skip_field(wt) !>")
+        } else {
+            this.line("            let field_num, wt = tag")
+            this.line("            match field_num {")
+            each m.fields as f {
+                this.emit_decode_field(m, f, scope)
+            }
+            this.line("                default => r.skip_field(wt) !>")
+            this.line("            }")
+        }
+        this.line("        }")
+        this.line("    }")
+        this.line()
+
+        // decode_proto_reader
+        this.line("    /// Decodes a `%{valk_name}` from an existing `Reader`.")
+        this.line("    %{pub_p}static fn decode_proto_reader(r: %{pb}.Reader) SELF !%{pb}.Error {")
+        this.line("        let msg = SELF {}")
+        this.line("        msg.merge_proto_reader(r) !>")
+        this.line("        return msg")
+        this.line("    }")
+        this.line()
+
+        // decode_proto
+        this.line("    /// Decodes a `%{valk_name}` from Protocol Buffers wire bytes.")
+        this.line("    %{pub_p}static fn decode_proto(data: local &[u8]) SELF !%{pb}.Error {")
+        this.line("        let r = %{pb}.Reader.from_bytes(data)")
+        this.line("        return SELF.decode_proto_reader(r) !>")
+        this.line("    }")
+
+        this.line("}")
+        this.line()
+    }
+
+    fn elem_valk_type(proto_type: String, scope: Array[String]) String {
+        if is_scalar_type(proto_type) : return this.scalar_valk_type(proto_type)
+        let resolved, _ = this.resolve_proto_type(proto_type, scope)
+        return resolved
+    }
+
+    fn map_value_valk_type(proto_type: String, scope: Array[String]) String {
+        if is_scalar_type(proto_type) : return this.scalar_valk_type(proto_type)
+        let resolved, _ = this.resolve_proto_type(proto_type, scope)
+        return resolved
+    }
+
+    fn emit_encode_field(f: FieldDescriptor, scope: Array[String]) {
+        let pb = this.pb()
+        let fname = escape_valk_ident(f.name)
+        let num = f.number
+
+        if f.is_map {
+            let k_writer = this.scalar_writer_method(f.map_key_type)
+            let k_cond = this.non_zero_condition(f.map_key_type, "k")
+            this.line("        each this.%{fname} as v, k {")
+            this.line("            let ew = %{pb}.Writer.new(32)")
+            this.line("            if %{k_cond} : ew.%{k_writer}(1, k)")
+            if is_scalar_type(f.map_value_type) {
+                let v_writer = this.scalar_writer_method(f.map_value_type)
+                let v_cond = this.non_zero_condition(f.map_value_type, "v")
+                this.line("            if %{v_cond} : ew.%{v_writer}(2, v)")
+            } else {
+                let _, is_enum = this.resolve_proto_type(f.map_value_type, scope)
+                if is_enum {
+                    this.line("            if v.to(i32) != 0 : ew.write_enum(2, v.to(i32))")
+                } else {
+                    this.line("            let mv = %{pb}.Writer.new(64)")
+                    this.line("            v.encode_proto(mv)")
+                    this.line("            ew.write_message_bytes(2, mv.buffer)")
+                }
+            }
+            this.line("            w.write_message_bytes(%{num}, ew.buffer)")
+            this.line("        }")
+            return
+        }
+
+        if f.is_repeated {
+            if is_packable_scalar(f.type_name) {
+                let opt = f.get_option("packed")
+                if isset(opt) && opt == "false" {
+                    let wm = this.scalar_writer_method(f.type_name)
+                    this.line("        each this.%{fname} as item : w.%{wm}(%{num}, item)")
+                } else {
+                    let pwm = this.scalar_packed_writer_method(f.type_name)
+                    this.line("        w.%{pwm}(%{num}, this.%{fname})")
+                }
+            } else if is_scalar_type(f.type_name) {
+                let wm = this.scalar_writer_method(f.type_name)
+                this.line("        each this.%{fname} as item : w.%{wm}(%{num}, item)")
+            } else {
+                let _, is_enum = this.resolve_proto_type(f.type_name, scope)
+                if is_enum {
+                    let opt = f.get_option("packed")
+                    if isset(opt) && opt == "false" {
+                        this.line("        each this.%{fname} as item : w.write_enum(%{num}, item.to(i32))")
+                    } else {
+                        this.line("        if this.%{fname}.length > 0 {")
+                        this.line("            let pw = %{pb}.Writer.new(this.%{fname}.length * 2)")
+                        this.line("            each this.%{fname} as item : pw.write_raw_enum(item.to(i32))")
+                        this.line("            w.write_message_bytes(%{num}, pw.buffer)")
+                        this.line("        }")
+                    }
+                } else {
+                    this.line("        each this.%{fname} as item {")
+                    this.line("            let sub_w = %{pb}.Writer.new(64)")
+                    this.line("            item.encode_proto(sub_w)")
+                    this.line("            w.write_message_bytes(%{num}, sub_w.buffer)")
+                    this.line("        }")
+                }
+            }
+            return
+        }
+
+        if f.is_optional || f.is_oneof {
+            let vvar = "opt_%{fname}"
+            this.line("        let %{vvar} = this.%{fname}")
+            if is_scalar_type(f.type_name) {
+                let wm = this.scalar_writer_method(f.type_name)
+                this.line("        if isset(%{vvar}) : w.%{wm}(%{num}, %{vvar})")
+            } else {
+                let _, is_enum = this.resolve_proto_type(f.type_name, scope)
+                if is_enum {
+                    this.line("        if isset(%{vvar}) : w.write_enum(%{num}, %{vvar}.to(i32))")
+                } else {
+                    this.line("        if isset(%{vvar}) {")
+                    this.line("            let sub_w = %{pb}.Writer.new(64)")
+                    this.line("            %{vvar}.encode_proto(sub_w)")
+                    this.line("            w.write_message_bytes(%{num}, sub_w.buffer)")
+                    this.line("        }")
+                }
+            }
+            return
+        }
+
+        // Singular implicit-presence field (omit default value per proto3 spec)
+        if is_scalar_type(f.type_name) {
+            let wm = this.scalar_writer_method(f.type_name)
+            let cond = this.non_zero_condition(f.type_name, "this.%{fname}")
+            this.line("        if %{cond} : w.%{wm}(%{num}, this.%{fname})")
+        } else {
+            let _, is_enum = this.resolve_proto_type(f.type_name, scope)
+            if is_enum {
+                this.line("        if this.%{fname}.to(i32) != 0 : w.write_enum(%{num}, this.%{fname}.to(i32))")
+            } else {
+                let vvar = "sub_%{fname}"
+                this.line("        let %{vvar} = this.%{fname}")
+                this.line("        if isset(%{vvar}) {")
+                this.line("            let sub_w = %{pb}.Writer.new(64)")
+                this.line("            %{vvar}.encode_proto(sub_w)")
+                this.line("            w.write_message_bytes(%{num}, sub_w.buffer)")
+                this.line("        }")
+            }
+        }
+    }
+
+    fn emit_decode_field(m: MessageDescriptor, f: FieldDescriptor, scope: Array[String]) {
+        let pb = this.pb()
+        let fname = escape_valk_ident(f.name)
+        let num = f.number
+
+        this.line("                %{num} => {")
+
+        if f.is_map {
+            let ktype = this.scalar_valk_type(f.map_key_type)
+            let kdef = this.scalar_default_expr(f.map_key_type)
+            let kread = this.scalar_reader_method(f.map_key_type)
+            this.line("                    let er = r.read_submessage() !>")
+            this.line("                    let mk: %{ktype} = %{kdef}")
+            if is_scalar_type(f.map_value_type) {
+                let vtype = this.scalar_valk_type(f.map_value_type)
+                let vdef = this.scalar_default_expr(f.map_value_type)
+                let vread = this.scalar_reader_method(f.map_value_type)
+                this.line("                    let mv: %{vtype} = %{vdef}")
+                this.line("                    while true {")
+                this.line("                        let etag = (er.next_tag() !>) ?! break")
+                this.line("                        let enum_f, ewt = etag")
+                this.line("                        if enum_f == 1 : mk = er.%{kread}() !>")
+                this.line("                        else if enum_f == 2 : mv = er.%{vread}() !>")
+                this.line("                        else : er.skip_field(ewt) !>")
+                this.line("                    }")
+                this.line("                    this.%{fname}.set(mk, mv)")
+            } else {
+                let vname, is_enum = this.resolve_proto_type(f.map_value_type, scope)
+                if is_enum {
+                    let def_var = this.enum_defaults.get(vname) !? "UNKNOWN"
+                    this.line("                    let mv: %{vname} = %{vname}.%{def_var}")
+                    this.line("                    while true {")
+                    this.line("                        let etag = (er.next_tag() !>) ?! break")
+                    this.line("                        let enum_f, ewt = etag")
+                    this.line("                        if enum_f == 1 : mk = er.%{kread}() !>")
+                    this.line("                        else if enum_f == 2 : mv = %{vname}_from_proto(er.read_enum() !>)")
+                    this.line("                        else : er.skip_field(ewt) !>")
+                    this.line("                    }")
+                    this.line("                    this.%{fname}.set(mk, mv)")
+                } else {
+                    this.line("                    let mv = %{vname} {}")
+                    this.line("                    while true {")
+                    this.line("                        let etag = (er.next_tag() !>) ?! break")
+                    this.line("                        let enum_f, ewt = etag")
+                    this.line("                        if enum_f == 1 {")
+                    this.line("                            mk = er.%{kread}() !>")
+                    this.line("                        } else if enum_f == 2 {")
+                    this.line("                            let vr = er.read_submessage() !>")
+                    this.line("                            mv.merge_proto_reader(vr) !>")
+                    this.line("                        } else {")
+                    this.line("                            er.skip_field(ewt) !>")
+                    this.line("                        }")
+                    this.line("                    }")
+                    this.line("                    this.%{fname}.set(mk, mv)")
+                }
+            }
+            this.line("                }")
+            return
+        }
+
+        if f.is_repeated {
+            if is_packable_scalar(f.type_name) {
+                let prm = this.scalar_packed_reader_into_method(f.type_name)
+                let rm = this.scalar_reader_method(f.type_name)
+                this.line("                    if wt == %{pb}.WireType.len {")
+                this.line("                        r.%{prm}(this.%{fname}) !>")
+                this.line("                    } else {")
+                this.line("                        this.%{fname}.append(r.%{rm}() !>)")
+                this.line("                    }")
+            } else if is_scalar_type(f.type_name) {
+                let rm = this.scalar_reader_method(f.type_name)
+                this.line("                    this.%{fname}.append(r.%{rm}() !>)")
+            } else {
+                let tname, is_enum = this.resolve_proto_type(f.type_name, scope)
+                if is_enum {
+                    this.line("                    if wt == %{pb}.WireType.len {")
+                    this.line("                        let packed = r.read_packed_enum() !>")
+                    this.line("                        each packed as raw : this.%{fname}.append(%{tname}_from_proto(raw))")
+                    this.line("                    } else {")
+                    this.line("                        this.%{fname}.append(%{tname}_from_proto(r.read_enum() !>))")
+                    this.line("                    }")
+                } else {
+                    this.line("                    let sr = r.read_submessage() !>")
+                    this.line("                    this.%{fname}.append(%{tname}.decode_proto_reader(sr) !>)")
+                }
+            }
+            this.line("                }")
+            return
+        }
+
+        // Clear sibling fields if this field belongs to a oneof
+        if f.is_oneof {
+            each m.fields as other {
+                if other.oneof_name == f.oneof_name && other.name != f.name {
+                    let oname = escape_valk_ident(other.name)
+                    this.line("                    this.%{oname} = null")
+                }
+            }
+        }
+
+        if is_scalar_type(f.type_name) {
+            let rm = this.scalar_reader_method(f.type_name)
+            this.line("                    this.%{fname} = r.%{rm}() !>")
+        } else {
+            let tname, is_enum = this.resolve_proto_type(f.type_name, scope)
+            if is_enum {
+                this.line("                    this.%{fname} = %{tname}_from_proto(r.read_enum() !>)")
+            } else {
+                this.line("                    let sr = r.read_submessage() !>")
+                this.line("                    let existing = this.%{fname}")
+                this.line("                    if isset(existing) {")
+                this.line("                        existing.merge_proto_reader(sr) !>")
+                this.line("                    } else {")
+                this.line("                        this.%{fname} = %{tname}.decode_proto_reader(sr) !>")
+                this.line("                    }")
+            }
+        }
+        this.line("                }")
+    }
+}
+
+fn join_scope(scope: Array[String], count: uint) String {
+    let buf = ByteBuffer.new(32)
+    let i: uint = 0
+    while i < count {
+        if i > 0 : buf.write_byte('.')
+        let seg = scope.get(i) !? ""
+        buf.write(seg)
+        i += 1
+    }
+    return buf.to_string()
+}
+
+fn escape_valk_ident(name: String) String {
+    match name {
+        "as", "break", "class", "continue", "default", "each", "else", "enum",
+        "error", "extern", "false", "fn", "get", "global", "if", "in",
+        "interface", "is", "isset", "let", "local", "match", "mode", "mut",
+        "null", "panic", "return", "SELF", "set", "static", "struct", "test",
+        "this", "throw", "true", "use", "value", "while" => return "%{name}_"
+        default => return name
+    }
+}

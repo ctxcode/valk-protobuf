@@ -1,0 +1,227 @@
+use protobuf
+
+test "DynamicMessage full round-trip with scalars, nested messages, repeated, maps, oneof, optional" {
+    let schema = "
+syntax = \"proto3\";
+package demo;
+
+enum Priority {
+    LOW = 0;
+    MEDIUM = 1;
+    HIGH = 2;
+}
+
+message Tag {
+    string key = 1;
+    string val = 2;
+}
+
+message Task {
+    int32 id = 1;
+    sint64 delta = 2;
+    string title = 3;
+    bool done = 4;
+    double progress = 5;
+    Priority priority = 6;
+    optional int32 retries = 7;
+    repeated int32 nums = 8;
+    repeated Tag tags = 9;
+    map<string, int32> counts = 10;
+    Tag primary_tag = 11;
+    oneof payload {
+        string note = 12;
+        int32 code = 13;
+    }
+}
+"
+
+    let file = protobuf.parse_proto(schema) ! { assert(false) return }
+    let task_desc = file.find_message("Task") ?! { assert(false) return }
+    let tag_desc = file.find_message("Tag") ?! { assert(false) return }
+
+    let msg = protobuf.DynamicMessage.new(task_desc, file)
+    msg.set_int32("id", 77)
+    msg.set_int64("delta", -54321)
+    msg.set_string("title", "Ship protobuf")
+    msg.set_bool("done", true)
+    msg.set_double("progress", 0.875)
+    msg.set_enum("priority", 2)
+    // Optional field explicitly set to zero MUST survive wire round-trip
+    msg.set_int32("retries", 0)
+
+    msg.set_list("nums", Array[protobuf.DynamicValue]{
+        protobuf.DynamicValue.from_int32(10),
+        protobuf.DynamicValue.from_int32(-20),
+        protobuf.DynamicValue.from_int32(300)
+    })
+
+    let t1 = protobuf.DynamicMessage.new(tag_desc, file)
+    t1.set_string("key", "env")
+    t1.set_string("val", "prod")
+    let t2 = protobuf.DynamicMessage.new(tag_desc, file)
+    t2.set_string("key", "team")
+    t2.set_string("val", "core")
+    msg.set_list("tags", Array[protobuf.DynamicValue]{
+        protobuf.DynamicValue.from_message(t1),
+        protobuf.DynamicValue.from_message(t2)
+    })
+
+    msg.set_map_entry("counts", protobuf.DynamicValue.from_string("alpha"), protobuf.DynamicValue.from_int32(5))
+    msg.set_map_entry("counts", protobuf.DynamicValue.from_string("beta"), protobuf.DynamicValue.from_int32(9))
+
+    let primary = protobuf.DynamicMessage.new(tag_desc, file)
+    primary.set_string("key", "main")
+    primary.set_string("val", "yes")
+    msg.set_message("primary_tag", primary)
+
+    // Oneof: setting note then code should leave only code
+    msg.set_string("note", "ignored")
+    msg.set_int32("code", 200)
+    assert(!msg.has("note"))
+    assert(msg.has("code"))
+
+    let wire = msg.encode()
+    assert(wire.bytes > 0)
+
+    // Append an unknown field on the wire to verify DynamicMessage skips it cleanly
+    let w = protobuf.Writer.new(wire.bytes + 16)
+    w.buffer.write(wire)
+    w.write_string(999, "unknown-future-field")
+    let wire_with_unknown = w.into_bytes()
+
+    let decoded = protobuf.DynamicMessage.decode(task_desc, wire_with_unknown, file) ! {
+        println("Dynamic decode error: %{E.message}")
+        assert(false)
+        return
+    }
+
+    assert(decoded.get_int32("id") == 77)
+    assert(decoded.get_int64("delta") == -54321)
+    assert(decoded.get_string("title") == "Ship protobuf")
+    assert(decoded.get_bool("done") == true)
+    assert(decoded.get_double("progress") == 0.875)
+    assert(decoded.get_enum("priority") == 2)
+    assert(decoded.has("retries") && decoded.get_int32("retries") == 0)
+
+    let nums = decoded.get_list("nums")
+    assert(nums.length == 3)
+    assert((nums.get(0) ! { assert(false) return }).int32_value == 10)
+    assert((nums.get(1) ! { assert(false) return }).int32_value == -20)
+    assert((nums.get(2) ! { assert(false) return }).int32_value == 300)
+
+    let tags = decoded.get_list("tags")
+    assert(tags.length == 2)
+    let dt1 = (tags.get(0) ! { assert(false) return }).message_value ?! { assert(false) return }
+    assert(dt1.get_string("key") == "env" && dt1.get_string("val") == "prod")
+
+    let counts = decoded.get("counts") ?! { assert(false) return }
+    assert((counts.map_get_string("alpha") ?! { assert(false) return }).int32_value == 5)
+    assert((counts.map_get_string("beta") ?! { assert(false) return }).int32_value == 9)
+
+    let dp = decoded.get_message("primary_tag") ?! { assert(false) return }
+    assert(dp.get_string("key") == "main" && dp.get_string("val") == "yes")
+
+    assert(!decoded.has("note"))
+    assert(decoded.has("code") && decoded.get_int32("code") == 200)
+}
+
+test "DynamicMessage accepts unpacked repeated scalars on wire" {
+    let schema = "
+syntax = \"proto3\";
+message Nums {
+    repeated int32 values = 1;
+}
+"
+    let file = protobuf.parse_proto(schema) ! { assert(false) return }
+    let desc = file.find_message("Nums") ?! { assert(false) return }
+
+    // Write unpacked repeated int32 (3 separate field 1 varints)
+    let w = protobuf.Writer.new()
+    w.write_int32(1, 4)
+    w.write_int32(1, 8)
+    w.write_int32(1, 15)
+
+    let decoded = protobuf.DynamicMessage.decode(desc, w.into_bytes(), file) ! { assert(false) return }
+    let items = decoded.get_list("values")
+    assert(items.length == 3)
+    assert((items.get(0) ! { assert(false) return }).int32_value == 4)
+    assert((items.get(1) ! { assert(false) return }).int32_value == 8)
+    assert((items.get(2) ! { assert(false) return }).int32_value == 15)
+}
+
+test "DynamicMessage merges repeated singular submessages and deduplicates map keys" {
+    let schema = "
+syntax = \"proto3\";
+message Inner {
+    string a = 1;
+    int32 b = 2;
+}
+message Outer {
+    Inner inner = 1;
+    map<string, int32> kv = 2;
+}
+"
+    let file = protobuf.parse_proto(schema) ! { assert(false) return }
+    let outer_desc = file.find_message("Outer") ?! { assert(false) return }
+
+    // Wire has two separate Inner submessages (first sets a, second sets b) -> must merge!
+    let part1 = protobuf.Writer.new()
+    part1.write_string(1, "from-first")
+    let part2 = protobuf.Writer.new()
+    part2.write_int32(2, 99)
+
+    // Wire has two map entries with same key "k" -> last wins (200)
+    let e1 = protobuf.Writer.new()
+    e1.write_string(1, "k")
+    e1.write_int32(2, 100)
+    let e2 = protobuf.Writer.new()
+    e2.write_string(1, "k")
+    e2.write_int32(2, 200)
+
+    let w = protobuf.Writer.new()
+    w.write_message_bytes(1, part1.buffer)
+    w.write_message_bytes(1, part2.buffer)
+    w.write_message_bytes(2, e1.buffer)
+    w.write_message_bytes(2, e2.buffer)
+
+    let decoded = protobuf.DynamicMessage.decode(outer_desc, w.into_bytes(), file) ! { assert(false) return }
+    let inner = decoded.get_message("inner") ?! { assert(false) return }
+    assert(inner.get_string("a") == "from-first")
+    assert(inner.get_int32("b") == 99)
+
+    let kv = decoded.get("kv") ?! { assert(false) return }
+    assert(kv.map_value.length == 1)
+    assert((kv.map_get_string("k") ?! { assert(false) return }).int32_value == 200)
+}
+
+test "DynamicMessage reports wire type mismatch and unknown types" {
+    let schema = "
+syntax = \"proto3\";
+message Msg {
+    int32 count = 1;
+    MissingType missing = 2;
+}
+"
+    let file = protobuf.parse_proto(schema) ! { assert(false) return }
+    let desc = file.find_message("Msg") ?! { assert(false) return }
+
+    // Wire type mismatch: string written for int32 field 1
+    let w1 = protobuf.Writer.new()
+    w1.write_string(1, "not-an-int")
+    let got_mismatch = false
+    protobuf.DynamicMessage.decode(desc, w1.into_bytes(), file) ! {
+        assert(error_is(E.code, wire_type_mismatch))
+        got_mismatch = true
+    }
+    assert(got_mismatch)
+
+    // Unknown submessage type
+    let w2 = protobuf.Writer.new()
+    w2.write_message_bytes(2, "")
+    let got_unknown = false
+    protobuf.DynamicMessage.decode(desc, w2.into_bytes(), file) ! {
+        assert(error_is(E.code, unknown_type))
+        got_unknown = true
+    }
+    assert(got_unknown)
+}

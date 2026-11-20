@@ -1,0 +1,7 @@
+debug
+vendor
+tests/vendor
+tests/tmp
+example/vendor
+cmd/vendor
+valk-protoc

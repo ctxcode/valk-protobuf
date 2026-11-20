@@ -1,0 +1,98 @@
+use valk.fs
+use protobuf
+
+fn print_usage() {
+    println("Usage: valk-protoc <schema.proto> [-o <output.valk>] [--import <module>] [--private] [--no-header]")
+    println("")
+    println("Options:")
+    println("  -o, --out <file>      Write generated Valk source to <file> (default: stdout)")
+    println("  --import <name>       Module name for `use <name>` (default: protobuf)")
+    println("  --private             Omit `+` public modifiers on generated types")
+    println("  --no-header           Omit the generated-file header comment")
+    println("  -h, --help            Show this help message")
+}
+
+fn main(args: Array[String]) i32 {
+    let input_path = ""
+    let output_path = ""
+    let opts = protobuf.CodegenOptions {}
+
+    let i: uint = 1
+    while i < args.length {
+        let arg = args.get(i) !? ""
+        if arg == "-h" || arg == "--help" {
+            print_usage()
+            return 0
+        }
+        if arg == "-o" || arg == "--out" {
+            i += 1
+            if i >= args.length {
+                println("Error: missing output path after %{arg}")
+                return 1
+            }
+            output_path = args.get(i) !? ""
+            i += 1
+            continue
+        }
+        if arg == "--import" {
+            i += 1
+            if i >= args.length {
+                println("Error: missing module name after --import")
+                return 1
+            }
+            opts.protobuf_import = args.get(i) !? "protobuf"
+            i += 1
+            continue
+        }
+        if arg == "--private" {
+            opts.public_types = false
+            i += 1
+            continue
+        }
+        if arg == "--no-header" {
+            opts.emit_header = false
+            i += 1
+            continue
+        }
+        if arg.starts_with("-") {
+            println("Error: unknown option '%{arg}'")
+            print_usage()
+            return 1
+        }
+        if input_path.bytes == 0 {
+            input_path = arg
+        } else {
+            println("Error: unexpected argument '%{arg}'")
+            return 1
+        }
+        i += 1
+    }
+
+    if input_path.bytes == 0 {
+        print_usage()
+        return 1
+    }
+
+    let source = fs.read(input_path) ! {
+        println("Error: failed to read '%{input_path}'")
+        return 1
+    }
+
+    let file = protobuf.parse_proto(source) ! {
+        println("Parse error at %{input_path}:%{E.line}:%{E.column}: %{E.message}")
+        return 1
+    }
+
+    let generated = protobuf.generate_valk(file, opts)
+
+    if output_path.bytes > 0 {
+        fs.write(output_path, generated) ! {
+            println("Error: failed to write '%{output_path}'")
+            return 1
+        }
+    } else {
+        print(generated)
+    }
+
+    return 0
+}

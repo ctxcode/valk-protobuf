@@ -1,0 +1,496 @@
+/// Bounds- and depth-checked Protocol Buffers wire-format reader.
++ class Reader {
+    /// Source byte view.
+    + source: &[u8]
+    /// Current byte offset in `source`.
+    + pos: uint (0)
+    /// Current submessage nesting depth.
+    + depth: uint (0)
+    /// Maximum allowed submessage nesting depth.
+    + max_depth: uint (MAX_DEPTH)
+
+    /// Creates a new zero-copy reader over heap-backed `data`.
+    + static fn new(data: &[u8], max_depth: uint (MAX_DEPTH)) Reader {
+        return Reader {
+            source: data
+            pos: 0
+            depth: 0
+            max_depth: max_depth
+        }
+    }
+
+    /// Creates a new reader from any byte slice (including stack-local slices).
+    + static fn from_bytes(data: local &[u8], max_depth: uint (MAX_DEPTH)) Reader {
+        let owned = data.to_string()
+        return Reader {
+            source: owned
+            pos: 0
+            depth: 0
+            max_depth: max_depth
+        }
+    }
+
+    /// Returns true when all bytes in the current reader slice have been consumed.
+    + get is_eof: bool {
+        return this.pos >= this.source.length
+    }
+
+    /// Returns the number of unread bytes remaining.
+    + get remaining: uint {
+        return this.pos >= this.source.length ? 0 : this.source.length - this.pos
+    }
+
+    /// Reads the next `(field_number, wire_type)` tag, or returns `null` at EOF.
+    + fn next_tag() ?(u32, WireType) !Error {
+        if this.is_eof : return null
+        let start = this.pos
+        let raw = this.read_varint() !>
+        if raw > 0xffffffff {
+            throw .invalid_field_number {
+                message: "Tag varint exceeds 32-bit range"
+                offset: start
+            }
+        }
+        let tag = raw.to(u32)
+        let field_num = tag >> 3
+        let wt_raw = (tag & 0x7).to(u8)
+        if field_num == 0 || field_num > MAX_FIELD_NUMBER {
+            throw .invalid_field_number {
+                message: "Invalid protobuf field number: %{field_num}"
+                offset: start
+            }
+        }
+        let wt = wire_type_from_u8(wt_raw, start) !>
+        return (field_num, wt)
+    }
+
+    /// Reads a base-128 varint up to 64 bits.
+    ///
+    /// Throws `.truncated` on premature EOF and `.varint_overflow` if the varint exceeds 64 bits.
+    + fn read_varint() u64 !Error {
+        let start = this.pos
+        let result: u64 = 0
+        let shift: u64 = 0
+        let count: uint = 0
+        while count < 10 {
+            if this.pos >= this.source.length {
+                throw .truncated {
+                    message: "Unexpected end of input while reading varint"
+                    offset: this.pos
+                }
+            }
+            let b = this.source.get(this.pos) ! throw .truncated {
+                message: "Unexpected end of input while reading varint"
+                offset: this.pos
+            }
+            this.pos += 1
+            if count == 9 && b > 1 {
+                throw .varint_overflow {
+                    message: "Varint overflows 64 bits"
+                    offset: start
+                }
+            }
+            result = result | ((b & 0x7f).to(u64) << shift)
+            if (b & 0x80) == 0 : return result
+            shift += 7
+            count += 1
+        }
+        throw .varint_overflow {
+            message: "Varint exceeds maximum 10-byte encoding"
+            offset: start
+        }
+    }
+
+    /// Reads a protobuf `int32` varint.
+    + fn read_int32() i32 !Error {
+        let v = this.read_varint() !>
+        return v.to(u32).to(i32)
+    }
+
+    /// Reads a protobuf `int64` varint.
+    + fn read_int64() i64 !Error {
+        let v = this.read_varint() !>
+        return v.to(i64)
+    }
+
+    /// Reads a protobuf `uint32` varint.
+    + fn read_uint32() u32 !Error {
+        let v = this.read_varint() !>
+        return v.to(u32)
+    }
+
+    /// Reads a protobuf `uint64` varint.
+    + fn read_uint64() u64 !Error {
+        return this.read_varint() !>
+    }
+
+    /// Reads a ZigZag-encoded `sint32` varint.
+    + fn read_sint32() i32 !Error {
+        let v = this.read_varint() !>
+        return zigzag_decode32(v.to(u32))
+    }
+
+    /// Reads a ZigZag-encoded `sint64` varint.
+    + fn read_sint64() i64 !Error {
+        let v = this.read_varint() !>
+        return zigzag_decode64(v)
+    }
+
+    /// Reads a protobuf `bool` varint.
+    + fn read_bool() bool !Error {
+        let v = this.read_varint() !>
+        return v != 0
+    }
+
+    /// Reads a protobuf `enum` value as a 32-bit signed integer.
+    + fn read_enum() i32 !Error {
+        let v = this.read_varint() !>
+        return v.to(u32).to(i32)
+    }
+
+    /// Reads a 32-bit little-endian `fixed32` integer.
+    + fn read_fixed32() u32 !Error {
+        if this.remaining < 4 {
+            throw .truncated {
+                message: "Unexpected end of input while reading fixed32"
+                offset: this.pos
+            }
+        }
+        let p = this.pos
+        let b0 = (this.source.get(p) ! throw .truncated { message: "Unexpected EOF", offset: p }).to(u32)
+        let b1 = (this.source.get(p + 1) ! throw .truncated { message: "Unexpected EOF", offset: p }).to(u32)
+        let b2 = (this.source.get(p + 2) ! throw .truncated { message: "Unexpected EOF", offset: p }).to(u32)
+        let b3 = (this.source.get(p + 3) ! throw .truncated { message: "Unexpected EOF", offset: p }).to(u32)
+        this.pos += 4
+        return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    }
+
+    /// Reads a 32-bit little-endian `sfixed32` integer.
+    + fn read_sfixed32() i32 !Error {
+        let v = this.read_fixed32() !>
+        return v.to(i32)
+    }
+
+    /// Reads a 64-bit little-endian `fixed64` integer.
+    + fn read_fixed64() u64 !Error {
+        if this.remaining < 8 {
+            throw .truncated {
+                message: "Unexpected end of input while reading fixed64"
+                offset: this.pos
+            }
+        }
+        let lo = (this.read_fixed32() !>).to(u64)
+        let hi = (this.read_fixed32() !>).to(u64)
+        return lo | (hi << 32)
+    }
+
+    /// Reads a 64-bit little-endian `sfixed64` integer.
+    + fn read_sfixed64() i64 !Error {
+        let v = this.read_fixed64() !>
+        return v.to(i64)
+    }
+
+    /// Reads an IEEE-754 32-bit little-endian `float`.
+    + fn read_float() f32 !Error {
+        let bits = this.read_fixed32() !>
+        return f32_from_bits(bits)
+    }
+
+    /// Reads an IEEE-754 64-bit little-endian `double`.
+    + fn read_double() f64 !Error {
+        let bits = this.read_fixed64() !>
+        return f64_from_bits(bits)
+    }
+
+    /// Reads a length-delimited byte slice as a `String`.
+    + fn read_bytes() String !Error {
+        let start = this.pos
+        let len_u64 = this.read_varint() !>
+        if len_u64 > this.remaining.to(u64) {
+            throw .length_overflow {
+                message: "Length-delimited field length %{len_u64} exceeds remaining %{this.remaining} bytes"
+                offset: start
+            }
+        }
+        let len = len_u64.to(uint)
+        let view = this.source.view(this.pos, len)
+        this.pos += len
+        return view.to_string()
+    }
+
+    /// Reads a length-delimited UTF-8 `string` field.
+    + fn read_string() String !Error {
+        return this.read_bytes() !>
+    }
+
+    /// Reads a length-delimited submessage and returns a bounded sub-`Reader` with incremented depth.
+    ///
+    /// Throws `.depth_limit` when nesting depth exceeds `max_depth`.
+    + fn read_submessage() Reader !Error {
+        if this.depth >= this.max_depth {
+            throw .depth_limit {
+                message: "Message nesting depth exceeded limit of %{this.max_depth}"
+                offset: this.pos
+            }
+        }
+        let start = this.pos
+        let len_u64 = this.read_varint() !>
+        if len_u64 > this.remaining.to(u64) {
+            throw .length_overflow {
+                message: "Submessage length %{len_u64} exceeds remaining %{this.remaining} bytes"
+                offset: start
+            }
+        }
+        let len = len_u64.to(uint)
+        let view = this.source.view(this.pos, len)
+        this.pos += len
+        return Reader {
+            source: view
+            pos: 0
+            depth: this.depth + 1
+            max_depth: this.max_depth
+        }
+    }
+
+    /// Skips an unknown field's value according to its `wire_type`.
+    + fn skip_field(wire_type: WireType) !Error {
+        match wire_type {
+            WireType.varint => {
+                this.read_varint() !>
+            }
+            WireType.fixed64 => {
+                if this.remaining < 8 {
+                    throw .truncated {
+                        message: "Unexpected end of input while skipping fixed64 field"
+                        offset: this.pos
+                    }
+                }
+                this.pos += 8
+            }
+            WireType.len => {
+                let start = this.pos
+                let len_u64 = this.read_varint() !>
+                if len_u64 > this.remaining.to(u64) {
+                    throw .length_overflow {
+                        message: "Skipped length-delimited field length %{len_u64} exceeds remaining %{this.remaining} bytes"
+                        offset: start
+                    }
+                }
+                this.pos += len_u64.to(uint)
+            }
+            WireType.fixed32 => {
+                if this.remaining < 4 {
+                    throw .truncated {
+                        message: "Unexpected end of input while skipping fixed32 field"
+                        offset: this.pos
+                    }
+                }
+                this.pos += 4
+            }
+        }
+    }
+
+    // --- Packed repeated scalar readers ---
+
+    /// Reads a packed repeated `int32` field.
+    + fn read_packed_int32() Array[i32] !Error {
+        let out = Array[i32]{}
+        this.read_packed_int32_into(out) !>
+        return out
+    }
+
+    /// Appends a packed repeated `int32` field into `out`.
+    + fn read_packed_int32_into(out: Array[i32]) !Error {
+        let sub = this.read_packed_slice() !>
+        while !sub.is_eof : out.append(sub.read_int32() !>)
+    }
+
+    /// Reads a packed repeated `int64` field.
+    + fn read_packed_int64() Array[i64] !Error {
+        let out = Array[i64]{}
+        this.read_packed_int64_into(out) !>
+        return out
+    }
+
+    /// Appends a packed repeated `int64` field into `out`.
+    + fn read_packed_int64_into(out: Array[i64]) !Error {
+        let sub = this.read_packed_slice() !>
+        while !sub.is_eof : out.append(sub.read_int64() !>)
+    }
+
+    /// Reads a packed repeated `uint32` field.
+    + fn read_packed_uint32() Array[u32] !Error {
+        let out = Array[u32]{}
+        this.read_packed_uint32_into(out) !>
+        return out
+    }
+
+    /// Appends a packed repeated `uint32` field into `out`.
+    + fn read_packed_uint32_into(out: Array[u32]) !Error {
+        let sub = this.read_packed_slice() !>
+        while !sub.is_eof : out.append(sub.read_uint32() !>)
+    }
+
+    /// Reads a packed repeated `uint64` field.
+    + fn read_packed_uint64() Array[u64] !Error {
+        let out = Array[u64]{}
+        this.read_packed_uint64_into(out) !>
+        return out
+    }
+
+    /// Appends a packed repeated `uint64` field into `out`.
+    + fn read_packed_uint64_into(out: Array[u64]) !Error {
+        let sub = this.read_packed_slice() !>
+        while !sub.is_eof : out.append(sub.read_uint64() !>)
+    }
+
+    /// Reads a packed repeated `sint32` field.
+    + fn read_packed_sint32() Array[i32] !Error {
+        let out = Array[i32]{}
+        this.read_packed_sint32_into(out) !>
+        return out
+    }
+
+    /// Appends a packed repeated `sint32` field into `out`.
+    + fn read_packed_sint32_into(out: Array[i32]) !Error {
+        let sub = this.read_packed_slice() !>
+        while !sub.is_eof : out.append(sub.read_sint32() !>)
+    }
+
+    /// Reads a packed repeated `sint64` field.
+    + fn read_packed_sint64() Array[i64] !Error {
+        let out = Array[i64]{}
+        this.read_packed_sint64_into(out) !>
+        return out
+    }
+
+    /// Appends a packed repeated `sint64` field into `out`.
+    + fn read_packed_sint64_into(out: Array[i64]) !Error {
+        let sub = this.read_packed_slice() !>
+        while !sub.is_eof : out.append(sub.read_sint64() !>)
+    }
+
+    /// Reads a packed repeated `bool` field.
+    + fn read_packed_bool() Array[bool] !Error {
+        let out = Array[bool]{}
+        this.read_packed_bool_into(out) !>
+        return out
+    }
+
+    /// Appends a packed repeated `bool` field into `out`.
+    + fn read_packed_bool_into(out: Array[bool]) !Error {
+        let sub = this.read_packed_slice() !>
+        while !sub.is_eof : out.append(sub.read_bool() !>)
+    }
+
+    /// Reads a packed repeated `enum` field.
+    + fn read_packed_enum() Array[i32] !Error {
+        let out = Array[i32]{}
+        this.read_packed_enum_into(out) !>
+        return out
+    }
+
+    /// Appends a packed repeated `enum` field into `out`.
+    + fn read_packed_enum_into(out: Array[i32]) !Error {
+        let sub = this.read_packed_slice() !>
+        while !sub.is_eof : out.append(sub.read_enum() !>)
+    }
+
+    /// Reads a packed repeated `fixed32` field.
+    + fn read_packed_fixed32() Array[u32] !Error {
+        let out = Array[u32]{}
+        this.read_packed_fixed32_into(out) !>
+        return out
+    }
+
+    /// Appends a packed repeated `fixed32` field into `out`.
+    + fn read_packed_fixed32_into(out: Array[u32]) !Error {
+        let sub = this.read_packed_slice() !>
+        while !sub.is_eof : out.append(sub.read_fixed32() !>)
+    }
+
+    /// Reads a packed repeated `sfixed32` field.
+    + fn read_packed_sfixed32() Array[i32] !Error {
+        let out = Array[i32]{}
+        this.read_packed_sfixed32_into(out) !>
+        return out
+    }
+
+    /// Appends a packed repeated `sfixed32` field into `out`.
+    + fn read_packed_sfixed32_into(out: Array[i32]) !Error {
+        let sub = this.read_packed_slice() !>
+        while !sub.is_eof : out.append(sub.read_sfixed32() !>)
+    }
+
+    /// Reads a packed repeated `fixed64` field.
+    + fn read_packed_fixed64() Array[u64] !Error {
+        let out = Array[u64]{}
+        this.read_packed_fixed64_into(out) !>
+        return out
+    }
+
+    /// Appends a packed repeated `fixed64` field into `out`.
+    + fn read_packed_fixed64_into(out: Array[u64]) !Error {
+        let sub = this.read_packed_slice() !>
+        while !sub.is_eof : out.append(sub.read_fixed64() !>)
+    }
+
+    /// Reads a packed repeated `sfixed64` field.
+    + fn read_packed_sfixed64() Array[i64] !Error {
+        let out = Array[i64]{}
+        this.read_packed_sfixed64_into(out) !>
+        return out
+    }
+
+    /// Appends a packed repeated `sfixed64` field into `out`.
+    + fn read_packed_sfixed64_into(out: Array[i64]) !Error {
+        let sub = this.read_packed_slice() !>
+        while !sub.is_eof : out.append(sub.read_sfixed64() !>)
+    }
+
+    /// Reads a packed repeated `float` field.
+    + fn read_packed_float() Array[f32] !Error {
+        let out = Array[f32]{}
+        this.read_packed_float_into(out) !>
+        return out
+    }
+
+    /// Appends a packed repeated `float` field into `out`.
+    + fn read_packed_float_into(out: Array[f32]) !Error {
+        let sub = this.read_packed_slice() !>
+        while !sub.is_eof : out.append(sub.read_float() !>)
+    }
+
+    /// Reads a packed repeated `double` field.
+    + fn read_packed_double() Array[f64] !Error {
+        let out = Array[f64]{}
+        this.read_packed_double_into(out) !>
+        return out
+    }
+
+    /// Appends a packed repeated `double` field into `out`.
+    + fn read_packed_double_into(out: Array[f64]) !Error {
+        let sub = this.read_packed_slice() !>
+        while !sub.is_eof : out.append(sub.read_double() !>)
+    }
+
+    fn read_packed_slice() Reader !Error {
+        let start = this.pos
+        let len_u64 = this.read_varint() !>
+        if len_u64 > this.remaining.to(u64) {
+            throw .length_overflow {
+                message: "Packed field length %{len_u64} exceeds remaining %{this.remaining} bytes"
+                offset: start
+            }
+        }
+        let len = len_u64.to(uint)
+        let view = this.source.view(this.pos, len)
+        this.pos += len
+        return Reader {
+            source: view
+            pos: 0
+            depth: this.depth
+            max_depth: this.max_depth
+        }
+    }
+}

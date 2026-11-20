@@ -1,0 +1,1169 @@
+/// Parses a `.proto` (proto3) schema source string into a `FileDescriptor` AST.
++ fn parse_proto(source: String) FileDescriptor !Error {
+    let parser = ProtoParser.from_source(source) !>
+    return parser.parse_file() !>
+}
+
+enum TokenKind {
+    eof
+    ident
+    string_lit
+    int_lit
+    float_lit
+    semicolon
+    lbrace
+    rbrace
+    lparen
+    rparen
+    lbracket
+    rbracket
+    langle
+    rangle
+    equals
+    comma
+    dot
+    colon
+    minus
+    plus
+}
+
+class Token {
+    kind: TokenKind
+    text: String
+    offset: uint
+    line: uint
+    column: uint
+    doc: String
+}
+
+class ProtoLexer {
+    src: String
+    pos: uint (0)
+    line: uint (1)
+    column: uint (1)
+    last_tok_end_line: uint (0)
+
+    static fn new(src: String) ProtoLexer {
+        return ProtoLexer { src: src }
+    }
+
+    fn is_eof() bool {
+        return this.pos >= this.src.bytes
+    }
+
+    fn peek(delta: uint (0)) u8 {
+        let idx = this.pos + delta
+        if idx >= this.src.bytes : return 0
+        return this.src.get(idx)
+    }
+
+    fn advance() u8 {
+        if this.pos >= this.src.bytes : return 0
+        let ch = this.src.get(this.pos)
+        this.pos += 1
+        if ch == '\n' {
+            this.line += 1
+            this.column = 1
+        } else {
+            this.column += 1
+        }
+        return ch
+    }
+
+    fn next_token() Token !Error {
+        let doc_lines = Array[String]{}
+        let blank_lines: uint = 0
+
+        // Skip whitespace and capture leading doc comments
+        while !this.is_eof() {
+            let ch = this.peek()
+            if ch == ' ' || ch == '\t' || ch == '\r' {
+                this.advance()
+                continue
+            }
+            if ch == '\n' {
+                this.advance()
+                blank_lines += 1
+                if blank_lines >= 2 && doc_lines.length > 0 {
+                    doc_lines.clear()
+                }
+                continue
+            }
+            // Single-line comment: // ...
+            if ch == '/' && this.peek(1) == '/' {
+                let comment_line = this.line
+                this.advance()
+                this.advance()
+                let buf = ByteBuffer.new(64)
+                while !this.is_eof() && this.peek() != '\n' {
+                    let c = this.advance()
+                    if c != '\r' : buf.write_byte(c)
+                }
+                // Trailing comment on the same line as the previous token is not a leading doc for the next token
+                if comment_line != this.last_tok_end_line {
+                    let text = buf.to_string().trim()
+                    doc_lines.append(text)
+                    blank_lines = 0
+                }
+                continue
+            }
+            // Block comment: /* ... */
+            if ch == '/' && this.peek(1) == '*' {
+                let start_line = this.line
+                let start_col = this.column
+                let start_off = this.pos
+                this.advance()
+                this.advance()
+                let buf = ByteBuffer.new(64)
+                let closed = false
+                while !this.is_eof() {
+                    if this.peek() == '*' && this.peek(1) == '/' {
+                        this.advance()
+                        this.advance()
+                        closed = true
+                        break
+                    }
+                    let c = this.advance()
+                    if c != '\r' : buf.write_byte(c)
+                }
+                if !closed {
+                    throw .syntax_error {
+                        message: "Unterminated block comment"
+                        offset: start_off
+                        line: start_line
+                        column: start_col
+                    }
+                }
+                if start_line != this.last_tok_end_line {
+                    let raw = buf.to_string()
+                    let cleaned = clean_block_comment(raw)
+                    if cleaned.bytes > 0 {
+                        doc_lines.append(cleaned)
+                        blank_lines = 0
+                    }
+                }
+                continue
+            }
+            break
+        }
+
+        let doc = doc_lines.length > 0 ? doc_lines.join("\n") : ""
+        let start_off = this.pos
+        let start_line = this.line
+        let start_col = this.column
+
+        if this.is_eof() {
+            return Token {
+                kind: TokenKind.eof
+                text: ""
+                offset: start_off
+                line: start_line
+                column: start_col
+                doc: doc
+            }
+        }
+
+        let ch = this.peek()
+
+        // Single-character punctuation
+        if ch == ';' { this.advance() ; return this.make_tok(TokenKind.semicolon, ";", start_off, start_line, start_col, doc) }
+        if ch == '{' { this.advance() ; return this.make_tok(TokenKind.lbrace, "{", start_off, start_line, start_col, doc) }
+        if ch == '}' { this.advance() ; return this.make_tok(TokenKind.rbrace, "}", start_off, start_line, start_col, doc) }
+        if ch == '(' { this.advance() ; return this.make_tok(TokenKind.lparen, "(", start_off, start_line, start_col, doc) }
+        if ch == ')' { this.advance() ; return this.make_tok(TokenKind.rparen, ")", start_off, start_line, start_col, doc) }
+        if ch == '[' { this.advance() ; return this.make_tok(TokenKind.lbracket, "[", start_off, start_line, start_col, doc) }
+        if ch == ']' { this.advance() ; return this.make_tok(TokenKind.rbracket, "]", start_off, start_line, start_col, doc) }
+        if ch == '<' { this.advance() ; return this.make_tok(TokenKind.langle, "<", start_off, start_line, start_col, doc) }
+        if ch == '>' { this.advance() ; return this.make_tok(TokenKind.rangle, ">", start_off, start_line, start_col, doc) }
+        if ch == '=' { this.advance() ; return this.make_tok(TokenKind.equals, "=", start_off, start_line, start_col, doc) }
+        if ch == ',' { this.advance() ; return this.make_tok(TokenKind.comma, ",", start_off, start_line, start_col, doc) }
+        if ch == ':' { this.advance() ; return this.make_tok(TokenKind.colon, ":", start_off, start_line, start_col, doc) }
+        if ch == '-' { this.advance() ; return this.make_tok(TokenKind.minus, "-", start_off, start_line, start_col, doc) }
+        if ch == '+' { this.advance() ; return this.make_tok(TokenKind.plus, "+", start_off, start_line, start_col, doc) }
+        if ch == '.' {
+            // Could be float literal like `.5` or punctuation `.`
+            if is_digit(this.peek(1)) {
+                return this.read_number(start_off, start_line, start_col, doc) !>
+            }
+            this.advance()
+            return this.make_tok(TokenKind.dot, ".", start_off, start_line, start_col, doc)
+        }
+
+        // String literal ("..." or '...')
+        if ch == '"' || ch == '\'' {
+            let text = this.read_string(start_off, start_line, start_col) !>
+            return this.make_tok(TokenKind.string_lit, text, start_off, start_line, start_col, doc)
+        }
+
+        // Identifier
+        if is_ident_start(ch) {
+            let buf = ByteBuffer.new(32)
+            while !this.is_eof() && is_ident_cont(this.peek()) {
+                buf.write_byte(this.advance())
+            }
+            return this.make_tok(TokenKind.ident, buf.to_string(), start_off, start_line, start_col, doc)
+        }
+
+        // Number literal
+        if is_digit(ch) {
+            return this.read_number(start_off, start_line, start_col, doc) !>
+        }
+
+        throw .syntax_error {
+            message: "Unexpected character in .proto input"
+            offset: start_off
+            line: start_line
+            column: start_col
+        }
+    }
+
+    fn make_tok(kind: TokenKind, text: String, off: uint, line: uint, col: uint, doc: String) Token {
+        this.last_tok_end_line = this.line
+        return Token {
+            kind: kind
+            text: text
+            offset: off
+            line: line
+            column: col
+            doc: doc
+        }
+    }
+
+    fn read_string(start_off: uint, start_line: uint, start_col: uint) String !Error {
+        let quote = this.advance()
+        let buf = ByteBuffer.new(32)
+        while !this.is_eof() {
+            let c = this.advance()
+            if c == quote {
+                return buf.to_string()
+            }
+            if c == '\n' || c == '\r' {
+                throw .syntax_error {
+                    message: "Unterminated string literal"
+                    offset: start_off
+                    line: start_line
+                    column: start_col
+                }
+            }
+            if c == '\\' {
+                if this.is_eof() {
+                    throw .syntax_error {
+                        message: "Unterminated escape sequence in string literal"
+                        offset: this.pos
+                        line: this.line
+                        column: this.column
+                    }
+                }
+                let esc = this.advance()
+                match esc {
+                    'n' => buf.write_byte('\n')
+                    'r' => buf.write_byte('\r')
+                    't' => buf.write_byte('\t')
+                    '\\' => buf.write_byte('\\')
+                    '"' => buf.write_byte('"')
+                    '\'' => buf.write_byte('\'')
+                    'a' => buf.write_byte(0x07)
+                    'b' => buf.write_byte(0x08)
+                    'f' => buf.write_byte(0x0c)
+                    'v' => buf.write_byte(0x0b)
+                    'x', 'X' => {
+                        let d1 = hex_val(this.advance())
+                        let d2 = hex_val(this.advance())
+                        if d1 < 0 || d2 < 0 {
+                            throw .syntax_error {
+                                message: "Invalid hex escape sequence"
+                                offset: this.pos
+                                line: this.line
+                                column: this.column
+                            }
+                        }
+                        buf.write_byte(((d1 << 4) | d2).to(u8))
+                    }
+                    default => {
+                        if esc >= '0' && esc <= '7' {
+                            let val: i32 = (esc - '0').to(i32)
+                            let n: uint = 0
+                            while n < 2 && !this.is_eof() {
+                                let p = this.peek()
+                                if p >= '0' && p <= '7' {
+                                    this.advance()
+                                    val = (val << 3) | (p - '0').to(i32)
+                                    n += 1
+                                } else {
+                                    break
+                                }
+                            }
+                            buf.write_byte((val & 0xff).to(u8))
+                        } else {
+                            buf.write_byte(esc)
+                        }
+                    }
+                }
+            } else {
+                buf.write_byte(c)
+            }
+        }
+        throw .syntax_error {
+            message: "Unterminated string literal"
+            offset: start_off
+            line: start_line
+            column: start_col
+        }
+    }
+
+    fn read_number(start_off: uint, start_line: uint, start_col: uint, doc: String) Token !Error {
+        let buf = ByteBuffer.new(32)
+        let is_float = false
+
+        // Hex literal 0x...
+        if this.peek() == '0' && (this.peek(1) == 'x' || this.peek(1) == 'X') {
+            buf.write_byte(this.advance())
+            buf.write_byte(this.advance())
+            let digits: uint = 0
+            while !this.is_eof() && is_hex_digit(this.peek()) {
+                buf.write_byte(this.advance())
+                digits += 1
+            }
+            if digits == 0 {
+                throw .syntax_error {
+                    message: "Invalid hexadecimal integer literal"
+                    offset: start_off
+                    line: start_line
+                    column: start_col
+                }
+            }
+            return this.make_tok(TokenKind.int_lit, buf.to_string(), start_off, start_line, start_col, doc)
+        }
+
+        while !this.is_eof() && is_digit(this.peek()) {
+            buf.write_byte(this.advance())
+        }
+        if !this.is_eof() && this.peek() == '.' {
+            is_float = true
+            buf.write_byte(this.advance())
+            while !this.is_eof() && is_digit(this.peek()) {
+                buf.write_byte(this.advance())
+            }
+        }
+        if !this.is_eof() && (this.peek() == 'e' || this.peek() == 'E') {
+            is_float = true
+            buf.write_byte(this.advance())
+            if !this.is_eof() && (this.peek() == '+' || this.peek() == '-') {
+                buf.write_byte(this.advance())
+            }
+            let exp_digits: uint = 0
+            while !this.is_eof() && is_digit(this.peek()) {
+                buf.write_byte(this.advance())
+                exp_digits += 1
+            }
+            if exp_digits == 0 {
+                throw .syntax_error {
+                    message: "Invalid floating-point exponent"
+                    offset: start_off
+                    line: start_line
+                    column: start_col
+                }
+            }
+        }
+        let kind = is_float ? TokenKind.float_lit : TokenKind.int_lit
+        return this.make_tok(kind, buf.to_string(), start_off, start_line, start_col, doc)
+    }
+}
+
+class ProtoParser {
+    tokens: Array[Token]
+    idx: uint (0)
+
+    static fn from_source(source: String) ProtoParser !Error {
+        let lex = ProtoLexer.new(source)
+        let tokens = Array[Token]{}
+        while true {
+            let tok = lex.next_token() !>
+            tokens.append(tok)
+            if tok.kind == TokenKind.eof : break
+        }
+        return ProtoParser { tokens: tokens, idx: 0 }
+    }
+
+    fn cur() Token {
+        if this.idx >= this.tokens.length {
+            return this.tokens.get(this.tokens.length - 1) !? Token {
+                kind: TokenKind.eof
+                text: ""
+                offset: 0
+                line: 1
+                column: 1
+                doc: ""
+            }
+        }
+        return this.tokens.get(this.idx) !? Token {
+            kind: TokenKind.eof
+            text: ""
+            offset: 0
+            line: 1
+            column: 1
+            doc: ""
+        }
+    }
+
+    fn peek(delta: uint) Token {
+        let target = this.idx + delta
+        if target >= this.tokens.length {
+            return this.tokens.get(this.tokens.length - 1) !? Token {
+                kind: TokenKind.eof
+                text: ""
+                offset: 0
+                line: 1
+                column: 1
+                doc: ""
+            }
+        }
+        return this.tokens.get(target) !? Token {
+            kind: TokenKind.eof
+            text: ""
+            offset: 0
+            line: 1
+            column: 1
+            doc: ""
+        }
+    }
+
+    fn next() Token {
+        let t = this.cur()
+        if this.idx < this.tokens.length - 1 : this.idx += 1
+        return t
+    }
+
+    fn expect(kind: TokenKind, expected: String) Token !Error {
+        let t = this.cur()
+        if t.kind != kind {
+            throw .syntax_error {
+                message: "Expected %{expected}, got '%{t.text}'"
+                offset: t.offset
+                line: t.line
+                column: t.column
+            }
+        }
+        return this.next()
+    }
+
+    fn expect_ident(expected: String) Token !Error {
+        return this.expect(TokenKind.ident, expected) !>
+    }
+
+    fn expect_keyword(kw: String) Token !Error {
+        let t = this.cur()
+        if t.kind != TokenKind.ident || t.text != kw {
+            throw .syntax_error {
+                message: "Expected '%{kw}', got '%{t.text}'"
+                offset: t.offset
+                line: t.line
+                column: t.column
+            }
+        }
+        return this.next()
+    }
+
+    fn parse_string_value() String !Error {
+        let first = this.expect(TokenKind.string_lit, "string literal") !>
+        let buf = ByteBuffer.new(first.text.bytes)
+        buf.write(first.text)
+        // Protobuf allows adjacent string literals to concatenate
+        while this.cur().kind == TokenKind.string_lit {
+            let more = this.next()
+            buf.write(more.text)
+        }
+        return buf.to_string()
+    }
+
+    fn parse_qualified_name() String !Error {
+        let buf = ByteBuffer.new(32)
+        if this.cur().kind == TokenKind.dot {
+            this.next()
+            buf.write_byte('.')
+        }
+        let first = this.expect_ident("identifier") !>
+        buf.write(first.text)
+        while this.cur().kind == TokenKind.dot {
+            this.next()
+            buf.write_byte('.')
+            let seg = this.expect_ident("identifier") !>
+            buf.write(seg.text)
+        }
+        return buf.to_string()
+    }
+
+    fn parse_option_name() String !Error {
+        let buf = ByteBuffer.new(32)
+        if this.cur().kind == TokenKind.lparen {
+            this.next()
+            buf.write_byte('(')
+            buf.write(this.parse_qualified_name() !>)
+            this.expect(TokenKind.rparen, "')'") !>
+            buf.write_byte(')')
+        } else {
+            let first = this.expect_ident("option name") !>
+            buf.write(first.text)
+        }
+        while this.cur().kind == TokenKind.dot {
+            this.next()
+            buf.write_byte('.')
+            if this.cur().kind == TokenKind.lparen {
+                this.next()
+                buf.write_byte('(')
+                buf.write(this.parse_qualified_name() !>)
+                this.expect(TokenKind.rparen, "')'") !>
+                buf.write_byte(')')
+            } else {
+                let seg = this.expect_ident("option field name") !>
+                buf.write(seg.text)
+            }
+        }
+        return buf.to_string()
+    }
+
+    fn parse_option_value() String !Error {
+        let t = this.cur()
+        if t.kind == TokenKind.string_lit {
+            return this.parse_string_value() !>
+        }
+        if t.kind == TokenKind.lbrace {
+            return this.parse_aggregate_option_value() !>
+        }
+        if t.kind == TokenKind.minus || t.kind == TokenKind.plus {
+            let sign = this.next().text
+            let val = this.cur()
+            if val.kind == TokenKind.int_lit || val.kind == TokenKind.float_lit || val.kind == TokenKind.ident {
+                this.next()
+                return sign + val.text
+            }
+            throw .syntax_error {
+                message: "Expected number or identifier after '%{sign}'"
+                offset: val.offset
+                line: val.line
+                column: val.column
+            }
+        }
+        if t.kind == TokenKind.int_lit || t.kind == TokenKind.float_lit {
+            this.next()
+            return t.text
+        }
+        if t.kind == TokenKind.ident {
+            return this.parse_qualified_name() !>
+        }
+        throw .syntax_error {
+            message: "Expected option value, got '%{t.text}'"
+            offset: t.offset
+            line: t.line
+            column: t.column
+        }
+    }
+
+    fn parse_aggregate_option_value() String !Error {
+        let open = this.expect(TokenKind.lbrace, "'{'") !>
+        let buf = ByteBuffer.new(64)
+        buf.write_byte('{')
+        let depth: uint = 1
+        let need_space = false
+        while depth > 0 {
+            let t = this.cur()
+            if t.kind == TokenKind.eof {
+                throw .syntax_error {
+                    message: "Unterminated aggregate option value"
+                    offset: open.offset
+                    line: open.line
+                    column: open.column
+                }
+            }
+            this.next()
+            if t.kind == TokenKind.lbrace {
+                if need_space : buf.write_byte(' ')
+                buf.write_byte('{')
+                depth += 1
+                need_space = false
+            } else if t.kind == TokenKind.rbrace {
+                depth -= 1
+                buf.write_byte('}')
+                need_space = true
+            } else if t.kind == TokenKind.colon || t.kind == TokenKind.comma || t.kind == TokenKind.semicolon {
+                buf.write(t.text)
+                need_space = true
+            } else if t.kind == TokenKind.string_lit {
+                if need_space : buf.write_byte(' ')
+                buf.write_byte('"')
+                buf.write(t.text)
+                buf.write_byte('"')
+                need_space = true
+            } else {
+                if need_space : buf.write_byte(' ')
+                buf.write(t.text)
+                need_space = true
+            }
+        }
+        return buf.to_string()
+    }
+
+    fn parse_option_statement() ProtoOption !Error {
+        this.expect_keyword("option") !>
+        let name = this.parse_option_name() !>
+        this.expect(TokenKind.equals, "'='") !>
+        let val = this.parse_option_value() !>
+        this.expect(TokenKind.semicolon, "';'") !>
+        return ProtoOption { name: name, value: val }
+    }
+
+    fn parse_field_options() Array[ProtoOption] !Error {
+        let opts = Array[ProtoOption]{}
+        if this.cur().kind != TokenKind.lbracket : return opts
+        this.next()
+        while this.cur().kind != TokenKind.rbracket {
+            let name = this.parse_option_name() !>
+            this.expect(TokenKind.equals, "'='") !>
+            let val = this.parse_option_value() !>
+            opts.append(ProtoOption { name: name, value: val })
+            if this.cur().kind == TokenKind.comma {
+                this.next()
+            } else {
+                break
+            }
+        }
+        this.expect(TokenKind.rbracket, "']'") !>
+        return opts
+    }
+
+    fn parse_signed_i32() i32 !Error {
+        let negative = false
+        if this.cur().kind == TokenKind.minus {
+            negative = true
+            this.next()
+        } else if this.cur().kind == TokenKind.plus {
+            this.next()
+        }
+        let tok = this.expect(TokenKind.int_lit, "integer literal") !>
+        let v = parse_proto_int(tok.text, negative, tok.offset, tok.line, tok.column) !>
+        if v < -2147483648 || v > 2147483647 {
+            throw .syntax_error {
+                message: "Integer literal out of 32-bit signed range: %{tok.text}"
+                offset: tok.offset
+                line: tok.line
+                column: tok.column
+            }
+        }
+        return v.to(i32)
+    }
+
+    fn parse_field_number() u32 !Error {
+        let tok = this.expect(TokenKind.int_lit, "field number") !>
+        let v = parse_proto_int(tok.text, false, tok.offset, tok.line, tok.column) !>
+        if v <= 0 || v > MAX_FIELD_NUMBER.to(i64) {
+            throw .invalid_field_number {
+                message: "Field number %{v} out of valid range (1..%{MAX_FIELD_NUMBER})"
+                offset: tok.offset
+                line: tok.line
+                column: tok.column
+            }
+        }
+        return v.to(u32)
+    }
+
+    fn parse_reserved(ranges: Array[ReservedRange], names: Array[String], is_enum: bool) !Error {
+        this.expect_keyword("reserved") !>
+        if this.cur().kind == TokenKind.string_lit {
+            while true {
+                let s = this.parse_string_value() !>
+                names.append(s)
+                if this.cur().kind == TokenKind.comma {
+                    this.next()
+                } else {
+                    break
+                }
+            }
+        } else {
+            while true {
+                let start = this.parse_signed_i32() !>
+                let end = start
+                if this.cur().kind == TokenKind.ident && this.cur().text == "to" {
+                    this.next()
+                    if this.cur().kind == TokenKind.ident && this.cur().text == "max" {
+                        this.next()
+                        end = is_enum ? 2147483647 : MAX_FIELD_NUMBER.to(i32)
+                    } else {
+                        end = this.parse_signed_i32() !>
+                    }
+                }
+                ranges.append(ReservedRange { start: start, end: end })
+                if this.cur().kind == TokenKind.comma {
+                    this.next()
+                } else {
+                    break
+                }
+            }
+        }
+        this.expect(TokenKind.semicolon, "';'") !>
+    }
+
+    fn parse_enum() EnumDescriptor !Error {
+        let kw = this.expect_keyword("enum") !>
+        let name = this.expect_ident("enum name") !>
+        this.expect(TokenKind.lbrace, "'{'") !>
+
+        let desc = EnumDescriptor {
+            name: name.text
+            doc: kw.doc
+        }
+
+        while this.cur().kind != TokenKind.rbrace && this.cur().kind != TokenKind.eof {
+            if this.cur().kind == TokenKind.semicolon {
+                this.next()
+                continue
+            }
+            if this.cur().kind == TokenKind.ident && this.cur().text == "option" && this.peek(1).kind != TokenKind.equals {
+                let opt = this.parse_option_statement() !>
+                desc.options.append(opt)
+                if opt.name == "allow_alias" && opt.value == "true" {
+                    desc.allow_alias = true
+                }
+                continue
+            }
+            if this.cur().kind == TokenKind.ident && this.cur().text == "reserved" && this.peek(1).kind != TokenKind.equals {
+                this.parse_reserved(desc.reserved_ranges, desc.reserved_names, true) !>
+                continue
+            }
+            let vname = this.expect_ident("enum value name") !>
+            this.expect(TokenKind.equals, "'='") !>
+            let num = this.parse_signed_i32() !>
+            let opts = this.parse_field_options() !>
+            this.expect(TokenKind.semicolon, "';'") !>
+            desc.values.append(EnumValueDescriptor {
+                name: vname.text
+                number: num
+                options: opts
+                doc: vname.doc
+            })
+        }
+
+        this.expect(TokenKind.rbrace, "'}'") !>
+        return desc
+    }
+
+    fn parse_oneof(msg: MessageDescriptor) OneofDescriptor !Error {
+        let kw = this.expect_keyword("oneof") !>
+        let name = this.expect_ident("oneof name") !>
+        this.expect(TokenKind.lbrace, "'{'") !>
+
+        let oneof = OneofDescriptor {
+            name: name.text
+            doc: kw.doc
+        }
+
+        while this.cur().kind != TokenKind.rbrace && this.cur().kind != TokenKind.eof {
+            if this.cur().kind == TokenKind.semicolon {
+                this.next()
+                continue
+            }
+            if this.cur().kind == TokenKind.ident && this.cur().text == "option" && this.peek(1).kind != TokenKind.equals && this.peek(2).kind == TokenKind.equals {
+                oneof.options.append(this.parse_option_statement() !>)
+                continue
+            }
+            let fdoc = this.cur().doc
+            let type_name = this.parse_qualified_name() !>
+            let fname = this.expect_ident("field name") !>
+            this.expect(TokenKind.equals, "'='") !>
+            let fnum = this.parse_field_number() !>
+            let fopts = this.parse_field_options() !>
+            this.expect(TokenKind.semicolon, "';'") !>
+            let field = FieldDescriptor {
+                name: fname.text
+                number: fnum
+                type_name: type_name
+                label: FieldLabel.none
+                oneof_name: oneof.name
+                options: fopts
+                doc: fdoc
+            }
+            oneof.fields.append(field)
+            msg.fields.append(field)
+        }
+
+        this.expect(TokenKind.rbrace, "'}'") !>
+        return oneof
+    }
+
+    fn parse_map_field() FieldDescriptor !Error {
+        let kw = this.expect_keyword("map") !>
+        this.expect(TokenKind.langle, "'<'") !>
+        let key_tok = this.expect_ident("map key type") !>
+        if !is_valid_map_key_type(key_tok.text) {
+            throw .syntax_error {
+                message: "Invalid map key type '%{key_tok.text}'"
+                offset: key_tok.offset
+                line: key_tok.line
+                column: key_tok.column
+            }
+        }
+        this.expect(TokenKind.comma, "','") !>
+        let val_type = this.parse_qualified_name() !>
+        this.expect(TokenKind.rangle, "'>'") !>
+        let fname = this.expect_ident("map field name") !>
+        this.expect(TokenKind.equals, "'='") !>
+        let fnum = this.parse_field_number() !>
+        let fopts = this.parse_field_options() !>
+        this.expect(TokenKind.semicolon, "';'") !>
+        return FieldDescriptor {
+            name: fname.text
+            number: fnum
+            type_name: "map<%{key_tok.text}, %{val_type}>"
+            label: FieldLabel.none
+            is_map: true
+            map_key_type: key_tok.text
+            map_value_type: val_type
+            options: fopts
+            doc: kw.doc
+        }
+    }
+
+    fn parse_message() MessageDescriptor !Error {
+        let kw = this.expect_keyword("message") !>
+        let name = this.expect_ident("message name") !>
+        this.expect(TokenKind.lbrace, "'{'") !>
+
+        let msg = MessageDescriptor {
+            name: name.text
+            doc: kw.doc
+        }
+
+        while this.cur().kind != TokenKind.rbrace && this.cur().kind != TokenKind.eof {
+            if this.cur().kind == TokenKind.semicolon {
+                this.next()
+                continue
+            }
+            let t = this.cur()
+            let t1 = this.peek(1)
+            if t.kind == TokenKind.ident {
+                if t.text == "message" && t1.kind == TokenKind.ident && this.peek(2).kind == TokenKind.lbrace {
+                    msg.nested_messages.append(this.parse_message() !>)
+                    continue
+                }
+                if t.text == "enum" && t1.kind == TokenKind.ident && this.peek(2).kind == TokenKind.lbrace {
+                    msg.nested_enums.append(this.parse_enum() !>)
+                    continue
+                }
+                if t.text == "oneof" && t1.kind == TokenKind.ident && this.peek(2).kind == TokenKind.lbrace {
+                    msg.oneofs.append(this.parse_oneof(msg) !>)
+                    continue
+                }
+                if t.text == "map" && t1.kind == TokenKind.langle {
+                    msg.fields.append(this.parse_map_field() !>)
+                    continue
+                }
+                if t.text == "option" && (t1.kind == TokenKind.lparen || (t1.kind == TokenKind.ident && (this.peek(2).kind == TokenKind.equals || this.peek(2).kind == TokenKind.dot))) {
+                    msg.options.append(this.parse_option_statement() !>)
+                    continue
+                }
+                if t.text == "reserved" && (t1.kind == TokenKind.int_lit || t1.kind == TokenKind.minus || t1.kind == TokenKind.string_lit) {
+                    this.parse_reserved(msg.reserved_ranges, msg.reserved_names, false) !>
+                    continue
+                }
+            }
+
+            // Regular field: [repeated | optional] <type> <name> = <number> [options];
+            let fdoc = t.doc
+            let label = FieldLabel.none
+            if t.kind == TokenKind.ident && (t.text == "repeated" || t.text == "optional" || t.text == "required") {
+                // Only treat as label if it is not itself the field type (e.g., `optional string x = 1;`)
+                if t1.kind == TokenKind.dot || (t1.kind == TokenKind.ident && this.peek(2).kind != TokenKind.equals) {
+                    if t.text == "repeated" : label = FieldLabel.repeated
+                    else if t.text == "optional" : label = FieldLabel.optional
+                    this.next()
+                }
+            }
+            let type_name = this.parse_qualified_name() !>
+            let fname = this.expect_ident("field name") !>
+            this.expect(TokenKind.equals, "'='") !>
+            let fnum = this.parse_field_number() !>
+            let fopts = this.parse_field_options() !>
+            this.expect(TokenKind.semicolon, "';'") !>
+            msg.fields.append(FieldDescriptor {
+                name: fname.text
+                number: fnum
+                type_name: type_name
+                label: label
+                options: fopts
+                doc: fdoc
+            })
+        }
+
+        this.expect(TokenKind.rbrace, "'}'") !>
+        return msg
+    }
+
+    fn parse_rpc() RpcDescriptor !Error {
+        let kw = this.expect_keyword("rpc") !>
+        let name = this.expect_ident("rpc name") !>
+        this.expect(TokenKind.lparen, "'('") !>
+        let client_streaming = false
+        if this.cur().kind == TokenKind.ident && this.cur().text == "stream" {
+            let next_tok = this.peek(1)
+            if next_tok.kind != TokenKind.rparen {
+                client_streaming = true
+                this.next()
+            }
+        }
+        let input_type = this.parse_qualified_name() !>
+        this.expect(TokenKind.rparen, "')'") !>
+        this.expect_keyword("returns") !>
+        this.expect(TokenKind.lparen, "'('") !>
+        let server_streaming = false
+        if this.cur().kind == TokenKind.ident && this.cur().text == "stream" {
+            let next_tok = this.peek(1)
+            if next_tok.kind != TokenKind.rparen {
+                server_streaming = true
+                this.next()
+            }
+        }
+        let output_type = this.parse_qualified_name() !>
+        this.expect(TokenKind.rparen, "')'") !>
+
+        let opts = Array[ProtoOption]{}
+        if this.cur().kind == TokenKind.lbrace {
+            this.next()
+            while this.cur().kind != TokenKind.rbrace && this.cur().kind != TokenKind.eof {
+                if this.cur().kind == TokenKind.semicolon {
+                    this.next()
+                    continue
+                }
+                opts.append(this.parse_option_statement() !>)
+            }
+            this.expect(TokenKind.rbrace, "'}'") !>
+        } else {
+            this.expect(TokenKind.semicolon, "';'") !>
+        }
+
+        return RpcDescriptor {
+            name: name.text
+            input_type: input_type
+            output_type: output_type
+            client_streaming: client_streaming
+            server_streaming: server_streaming
+            options: opts
+            doc: kw.doc
+        }
+    }
+
+    fn parse_service() ServiceDescriptor !Error {
+        let kw = this.expect_keyword("service") !>
+        let name = this.expect_ident("service name") !>
+        this.expect(TokenKind.lbrace, "'{'") !>
+
+        let svc = ServiceDescriptor {
+            name: name.text
+            doc: kw.doc
+        }
+
+        while this.cur().kind != TokenKind.rbrace && this.cur().kind != TokenKind.eof {
+            if this.cur().kind == TokenKind.semicolon {
+                this.next()
+                continue
+            }
+            if this.cur().kind == TokenKind.ident && this.cur().text == "option" {
+                svc.options.append(this.parse_option_statement() !>)
+                continue
+            }
+            if this.cur().kind == TokenKind.ident && this.cur().text == "rpc" {
+                svc.methods.append(this.parse_rpc() !>)
+                continue
+            }
+            let bad = this.cur()
+            throw .syntax_error {
+                message: "Unexpected token '%{bad.text}' inside service '%{svc.name}'"
+                offset: bad.offset
+                line: bad.line
+                column: bad.column
+            }
+        }
+
+        this.expect(TokenKind.rbrace, "'}'") !>
+        return svc
+    }
+
+    fn parse_file() FileDescriptor !Error {
+        let file = FileDescriptor {}
+        let first_doc_consumed = false
+
+        while this.cur().kind != TokenKind.eof {
+            if this.cur().kind == TokenKind.semicolon {
+                this.next()
+                continue
+            }
+            let t = this.cur()
+            if t.kind != TokenKind.ident {
+                throw .syntax_error {
+                    message: "Unexpected top-level token '%{t.text}'"
+                    offset: t.offset
+                    line: t.line
+                    column: t.column
+                }
+            }
+
+            if t.text == "syntax" {
+                if !first_doc_consumed && t.doc.bytes > 0 {
+                    file.doc = t.doc
+                    first_doc_consumed = true
+                }
+                this.next()
+                this.expect(TokenKind.equals, "'='") !>
+                file.syntax = this.parse_string_value() !>
+                this.expect(TokenKind.semicolon, "';'") !>
+                continue
+            }
+            if t.text == "edition" {
+                if !first_doc_consumed && t.doc.bytes > 0 {
+                    file.doc = t.doc
+                    first_doc_consumed = true
+                }
+                this.next()
+                this.expect(TokenKind.equals, "'='") !>
+                file.syntax = this.parse_string_value() !>
+                this.expect(TokenKind.semicolon, "';'") !>
+                continue
+            }
+            if t.text == "package" {
+                if !first_doc_consumed && t.doc.bytes > 0 {
+                    file.doc = t.doc
+                    first_doc_consumed = true
+                }
+                this.next()
+                file.package_name = this.parse_qualified_name() !>
+                this.expect(TokenKind.semicolon, "';'") !>
+                continue
+            }
+            if t.text == "import" {
+                this.next()
+                let is_public = false
+                let is_weak = false
+                if this.cur().kind == TokenKind.ident && this.cur().text == "public" {
+                    is_public = true
+                    this.next()
+                } else if this.cur().kind == TokenKind.ident && this.cur().text == "weak" {
+                    is_weak = true
+                    this.next()
+                }
+                let path = this.parse_string_value() !>
+                this.expect(TokenKind.semicolon, "';'") !>
+                file.imports.append(ImportDescriptor {
+                    path: path
+                    is_public: is_public
+                    is_weak: is_weak
+                })
+                continue
+            }
+            if t.text == "option" {
+                file.options.append(this.parse_option_statement() !>)
+                continue
+            }
+            if t.text == "message" {
+                first_doc_consumed = true
+                file.messages.append(this.parse_message() !>)
+                continue
+            }
+            if t.text == "enum" {
+                first_doc_consumed = true
+                file.enums.append(this.parse_enum() !>)
+                continue
+            }
+            if t.text == "service" {
+                first_doc_consumed = true
+                file.services.append(this.parse_service() !>)
+                continue
+            }
+
+            throw .syntax_error {
+                message: "Unexpected top-level declaration '%{t.text}'"
+                offset: t.offset
+                line: t.line
+                column: t.column
+            }
+        }
+
+        return file
+    }
+}
+
+fn is_ident_start(ch: u8) bool $inline {
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_'
+}
+
+fn is_ident_cont(ch: u8) bool $inline {
+    return is_ident_start(ch) || is_digit(ch)
+}
+
+fn is_digit(ch: u8) bool $inline {
+    return ch >= '0' && ch <= '9'
+}
+
+fn is_hex_digit(ch: u8) bool $inline {
+    return is_digit(ch) || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')
+}
+
+fn hex_val(ch: u8) i32 {
+    if ch >= '0' && ch <= '9' : return (ch - '0').to(i32)
+    if ch >= 'a' && ch <= 'f' : return (ch - 'a').to(i32) + 10
+    if ch >= 'A' && ch <= 'F' : return (ch - 'A').to(i32) + 10
+    return -1
+}
+
+fn clean_block_comment(raw: String) String {
+    let lines = raw.split("\n")
+    let out = Array[String]{}
+    each lines as line {
+        let s = line.trim()
+        if s.starts_with("*") {
+            s = s.range(1, s.bytes).trim()
+        }
+        if s.bytes > 0 || out.length > 0 {
+            out.append(s)
+        }
+    }
+    while out.length > 0 {
+        let last = out.get(out.length - 1) !? ""
+        if last.bytes == 0 {
+            out.pop_last() _
+        } else {
+            break
+        }
+    }
+    return out.join("\n")
+}
+
+fn parse_proto_int(text: String, negative: bool, offset: uint, line: uint, column: uint) i64 !Error {
+    let base: u64 = 10
+    let start: uint = 0
+    if text.bytes > 2 && (text.starts_with("0x") || text.starts_with("0X")) {
+        base = 16
+        start = 2
+    } else if text.bytes > 1 && text.starts_with("0") {
+        base = 8
+        start = 1
+    }
+    let acc: u64 = 0
+    let i = start
+    while i < text.bytes {
+        let ch = text.get(i)
+        let d = hex_val(ch)
+        if d < 0 || d.to(u64) >= base {
+            throw .syntax_error {
+                message: "Invalid integer literal '%{text}'"
+                offset: offset
+                line: line
+                column: column
+            }
+        }
+        acc = acc * base + d.to(u64)
+        i += 1
+    }
+    if negative {
+        if acc == 2147483648 : return -2147483648
+        return -(acc.to(i64))
+    }
+    return acc.to(i64)
+}

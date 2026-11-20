@@ -1,0 +1,550 @@
+use protobuf
+
+class HandWrittenPair is protobuf.ProtoMessage {
+    + key: String ("")
+    + val: i32 (0)
+
+    + fn encode_proto(w: protobuf.Writer) {
+        if this.key.bytes > 0 : w.write_string(1, this.key)
+        if this.val != 0 : w.write_int32(2, this.val)
+    }
+
+    + fn to_proto_bytes() String {
+        let w = protobuf.Writer.new(32)
+        this.encode_proto(w)
+        return w.into_bytes()
+    }
+}
+
+fn hex_bytes(data: String) String {
+    let hex = "0123456789abcdef"
+    let buf = ByteBuffer.new(data.bytes * 2)
+    let i: uint = 0
+    while i < data.bytes {
+        let b = data.get(i)
+        buf.write_byte(hex.get(((b >> 4) & 0x0f).to(uint)))
+        buf.write_byte(hex.get((b & 0x0f).to(uint)))
+        i += 1
+    }
+    return buf.to_string()
+}
+
+test "Varint edge cases and canonical encodings" {
+    // 0 -> 00
+    let w = protobuf.Writer.new()
+    w.write_varint(0)
+    assert(hex_bytes(w.to_bytes()) == "00")
+
+    // 1 -> 01
+    w.reset()
+    w.write_varint(1)
+    assert(hex_bytes(w.to_bytes()) == "01")
+
+    // 127 -> 7f
+    w.reset()
+    w.write_varint(127)
+    assert(hex_bytes(w.to_bytes()) == "7f")
+
+    // 128 -> 80 01
+    w.reset()
+    w.write_varint(128)
+    assert(hex_bytes(w.to_bytes()) == "8001")
+
+    // 300 -> ac 02 (official protobuf encoding doc example)
+    w.reset()
+    w.write_varint(300)
+    assert(hex_bytes(w.to_bytes()) == "ac02")
+
+    // u64 max -> 9x ff + 01 (10 bytes)
+    w.reset()
+    w.write_varint(0xffffffffffffffff)
+    assert(hex_bytes(w.to_bytes()) == "ffffffffffffffffff01")
+
+    // Round-trip all values through Reader
+    let values = Array[u64]{
+        0, 1, 127, 128, 255, 300, 16383, 16384,
+        0xffffffff, 0x100000000, 0x7fffffffffffffff, 0xffffffffffffffff
+    }
+    w.reset()
+    each values as v : w.write_varint(v)
+    let bytes = w.into_bytes()
+    let r = protobuf.Reader.new(bytes)
+    each values as expected {
+        let got = r.read_varint() ! { assert(false) return }
+        assert(got == expected)
+    }
+    assert(r.is_eof)
+}
+
+test "Negative int32 and int64 use 10-byte two's complement varints" {
+    // Official protobuf spec: negative int32 is sign-extended to 64-bit (10 bytes)
+    let w = protobuf.Writer.new()
+    w.write_raw_int32(-1)
+    let neg1 = w.to_bytes()
+    assert(neg1.bytes == 10)
+    assert(hex_bytes(neg1) == "ffffffffffffffffff01")
+
+    let r1 = protobuf.Reader.new(neg1)
+    let got1 = r1.read_int32() ! { assert(false) return }
+    assert(got1 == -1)
+
+    w.reset()
+    w.write_raw_int32(-2)
+    let neg2 = w.to_bytes()
+    assert(neg2.bytes == 10)
+    assert(hex_bytes(neg2) == "feffffffffffffffff01")
+
+    let r2 = protobuf.Reader.new(neg2)
+    let got2 = r2.read_int32() ! { assert(false) return }
+    assert(got2 == -2)
+
+    w.reset()
+    w.write_raw_int32(-2147483648)
+    let min32 = w.to_bytes()
+    assert(min32.bytes == 10)
+    let r3 = protobuf.Reader.new(min32)
+    let got3 = r3.read_int32() ! { assert(false) return }
+    assert(got3 == -2147483648)
+
+    w.reset()
+    w.write_raw_int64(-9223372036854775807 - 1)
+    let min64 = w.to_bytes()
+    assert(min64.bytes == 10)
+    let r4 = protobuf.Reader.new(min64)
+    let got4 = r4.read_int64() ! { assert(false) return }
+    assert(got4 == -9223372036854775807 - 1)
+}
+
+test "ZigZag encoding and decoding (sint32 and sint64)" {
+    assert(protobuf.zigzag_encode32(0) == 0)
+    assert(protobuf.zigzag_encode32(-1) == 1)
+    assert(protobuf.zigzag_encode32(1) == 2)
+    assert(protobuf.zigzag_encode32(-2) == 3)
+    assert(protobuf.zigzag_encode32(2147483647) == 4294967294)
+    assert(protobuf.zigzag_encode32(-2147483648) == 4294967295)
+
+    assert(protobuf.zigzag_decode32(0) == 0)
+    assert(protobuf.zigzag_decode32(1) == -1)
+    assert(protobuf.zigzag_decode32(2) == 1)
+    assert(protobuf.zigzag_decode32(3) == -2)
+    assert(protobuf.zigzag_decode32(4294967294) == 2147483647)
+    assert(protobuf.zigzag_decode32(4294967295) == -2147483648)
+
+    let max64: i64 = 9223372036854775807
+    let min64: i64 = -9223372036854775807 - 1
+    assert(protobuf.zigzag_encode64(0) == 0)
+    assert(protobuf.zigzag_encode64(-1) == 1)
+    assert(protobuf.zigzag_encode64(1) == 2)
+    assert(protobuf.zigzag_encode64(-2) == 3)
+    assert(protobuf.zigzag_encode64(max64) == 0xfffffffffffffffe)
+    assert(protobuf.zigzag_encode64(min64) == 0xffffffffffffffff)
+
+    assert(protobuf.zigzag_decode64(0) == 0)
+    assert(protobuf.zigzag_decode64(1) == -1)
+    assert(protobuf.zigzag_decode64(2) == 1)
+    assert(protobuf.zigzag_decode64(3) == -2)
+    assert(protobuf.zigzag_decode64(0xfffffffffffffffe) == max64)
+    assert(protobuf.zigzag_decode64(0xffffffffffffffff) == min64)
+
+    // Wire round-trip via Writer/Reader
+    let w = protobuf.Writer.new()
+    w.write_sint32(1, -42)
+    w.write_sint64(2, min64)
+    let bytes = w.into_bytes()
+    let r = protobuf.Reader.new(bytes)
+
+    let t1 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f1, wt1 = t1
+    assert(f1 == 1 && wt1 == protobuf.WireType.varint)
+    let v1 = r.read_sint32() ! { assert(false) return }
+    assert(v1 == -42)
+
+    let t2 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f2, wt2 = t2
+    assert(f2 == 2 && wt2 == protobuf.WireType.varint)
+    let v2 = r.read_sint64() ! { assert(false) return }
+    assert(v2 == min64)
+    assert(r.is_eof)
+}
+
+test "Fixed32, fixed64, float and double IEEE-754 wire encoding" {
+    let w = protobuf.Writer.new()
+    w.write_fixed32(1, 0x12345678)
+    w.write_sfixed32(2, -123456)
+    w.write_fixed64(3, 0x0102030405060708)
+    w.write_sfixed64(4, -9876543210123)
+    w.write_float(5, 1.0)
+    w.write_float(6, -3.5)
+    w.write_double(7, 3.141592653589793)
+
+    // Verify exact IEEE-754 little-endian bits for 1.0f (0x3f800000 -> 00 00 80 3f)
+    let wf = protobuf.Writer.new()
+    wf.write_raw_float(1.0)
+    assert(hex_bytes(wf.to_bytes()) == "0000803f")
+
+    // Verify exact IEEE-754 little-endian bits for 1.0d (0x3ff0000000000000 -> 000000000000f03f)
+    let wd = protobuf.Writer.new()
+    wd.write_raw_double(1.0)
+    assert(hex_bytes(wd.to_bytes()) == "000000000000f03f")
+
+    // Verify little-endian fixed32 byte order
+    let w32 = protobuf.Writer.new()
+    w32.write_raw_fixed32(0x12345678)
+    assert(hex_bytes(w32.to_bytes()) == "78563412")
+
+    let bytes = w.into_bytes()
+    let r = protobuf.Reader.new(bytes)
+
+    let t1 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f1, wt1 = t1
+    assert(f1 == 1 && wt1 == protobuf.WireType.fixed32)
+    assert((r.read_fixed32() ! { assert(false) return }) == 0x12345678)
+
+    let t2 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f2, wt2 = t2
+    assert(f2 == 2 && wt2 == protobuf.WireType.fixed32)
+    assert((r.read_sfixed32() ! { assert(false) return }) == -123456)
+
+    let t3 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f3, wt3 = t3
+    assert(f3 == 3 && wt3 == protobuf.WireType.fixed64)
+    assert((r.read_fixed64() ! { assert(false) return }) == 0x0102030405060708)
+
+    let t4 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f4, wt4 = t4
+    assert(f4 == 4 && wt4 == protobuf.WireType.fixed64)
+    assert((r.read_sfixed64() ! { assert(false) return }) == -9876543210123)
+
+    let t5 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f5, wt5 = t5
+    assert(f5 == 5 && wt5 == protobuf.WireType.fixed32)
+    assert((r.read_float() ! { assert(false) return }) == 1.0)
+
+    let t6 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f6, wt6 = t6
+    assert(f6 == 6 && wt6 == protobuf.WireType.fixed32)
+    assert((r.read_float() ! { assert(false) return }) == -3.5)
+
+    let t7 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f7, wt7 = t7
+    assert(f7 == 7 && wt7 == protobuf.WireType.fixed64)
+    assert((r.read_double() ! { assert(false) return }) == 3.141592653589793)
+
+    assert(r.is_eof)
+}
+
+test "Packed repeated fields and empty packed omission" {
+    let w = protobuf.Writer.new()
+    w.write_packed_int32(1, Array[i32]{})
+    assert(w.length == 0)
+
+    w.write_packed_int32(1, Array[i32]{ 3, 270, 86942, -5 })
+    w.write_packed_sint32(2, Array[i32]{ 0, -1, 1, -100 })
+    w.write_packed_bool(3, Array[bool]{ true, false, true })
+    w.write_packed_fixed32(4, Array[u32]{ 10, 20, 30 })
+    w.write_packed_double(5, Array[f64]{ 1.25, -2.5 })
+
+    let bytes = w.into_bytes()
+    let r = protobuf.Reader.new(bytes)
+
+    let t1 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f1, wt1 = t1
+    assert(f1 == 1 && wt1 == protobuf.WireType.len)
+    let a1 = r.read_packed_int32() ! { assert(false) return }
+    assert(a1.length == 4)
+    assert((a1.get(0) !? 0) == 3)
+    assert((a1.get(1) !? 0) == 270)
+    assert((a1.get(2) !? 0) == 86942)
+    assert((a1.get(3) !? 0) == -5)
+
+    let t2 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f2, wt2 = t2
+    assert(f2 == 2 && wt2 == protobuf.WireType.len)
+    let a2 = r.read_packed_sint32() ! { assert(false) return }
+    assert(a2.length == 4)
+    assert((a2.get(1) !? 0) == -1)
+    assert((a2.get(3) !? 0) == -100)
+
+    let t3 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f3, wt3 = t3
+    assert(f3 == 3 && wt3 == protobuf.WireType.len)
+    let a3 = r.read_packed_bool() ! { assert(false) return }
+    assert(a3.length == 3)
+    assert((a3.get(0) !? false) == true)
+    assert((a3.get(1) !? true) == false)
+    assert((a3.get(2) !? false) == true)
+
+    let t4 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f4, wt4 = t4
+    assert(f4 == 4 && wt4 == protobuf.WireType.len)
+    let a4 = r.read_packed_fixed32() ! { assert(false) return }
+    assert(a4.length == 3 && (a4.get(2) !? 0) == 30)
+
+    let t5 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f5, wt5 = t5
+    assert(f5 == 5 && wt5 == protobuf.WireType.len)
+    let a5 = r.read_packed_double() ! { assert(false) return }
+    assert(a5.length == 2 && (a5.get(0) !? 0.0) == 1.25 && (a5.get(1) !? 0.0) == -2.5)
+    assert(r.is_eof)
+}
+
+test "ProtoMessage submessage and unknown field skipping across all wire types" {
+    let w = protobuf.Writer.new()
+    // Unknown fields in every wire type
+    w.write_int64(10, 999999)
+    w.write_fixed64(11, 0xdeadbeefcafebabe)
+    w.write_string(12, "skip this string")
+    w.write_fixed32(13, 0x12345678)
+    // Known submessage at field 20
+    let pair = HandWrittenPair { key: "hello", val: 42 }
+    w.write_message(20, pair)
+    // Trailing known string at field 21
+    w.write_string(21, "after")
+
+    let bytes = w.into_bytes()
+    let r = protobuf.Reader.new(bytes)
+    let got_key = ""
+    let got_val: i32 = 0
+    let got_after = ""
+
+    while true {
+        let tag = (r.next_tag() ! { assert(false) return }) ?! break
+        let num, wt = tag
+        if num == 20 {
+            let sub = r.read_submessage() ! { assert(false) return }
+            while true {
+                let st = (sub.next_tag() ! { assert(false) return }) ?! break
+                let sn, swt = st
+                if sn == 1 : got_key = sub.read_string() ! { assert(false) return }
+                else if sn == 2 : got_val = sub.read_int32() ! { assert(false) return }
+                else : sub.skip_field(swt) ! { assert(false) return }
+            }
+        } else if num == 21 {
+            got_after = r.read_string() ! { assert(false) return }
+        } else {
+            r.skip_field(wt) ! { assert(false) return }
+        }
+    }
+
+    assert(got_key == "hello")
+    assert(got_val == 42)
+    assert(got_after == "after")
+}
+
+test "Wire error handling: truncation, overflow, invalid tags, and depth limit" {
+    // Truncated varint
+    let trunc_v = ByteBuffer.new(2)
+    trunc_v.write_byte(0x80)
+    let r1 = protobuf.Reader.new(trunc_v)
+    let got_trunc = false
+    r1.read_varint() ! {
+        assert(error_is(E.code, truncated))
+        got_trunc = true
+    }
+    assert(got_trunc)
+
+    // Varint overflow (10th byte > 1)
+    let over_v = ByteBuffer.new(10)
+    each 0 .. 9 : over_v.write_byte(0xff)
+    over_v.write_byte(0x02)
+    let r2 = protobuf.Reader.new(over_v)
+    let got_over = false
+    r2.read_varint() ! {
+        assert(error_is(E.code, varint_overflow))
+        got_over = true
+    }
+    assert(got_over)
+
+    // Invalid wire type (3 = deprecated SGROUP)
+    let bad_wt = ByteBuffer.new(2)
+    bad_wt.write_byte((1 << 3) | 3)
+    let r3 = protobuf.Reader.new(bad_wt)
+    let got_bad_wt = false
+    r3.next_tag() ! {
+        assert(error_is(E.code, invalid_wire_type))
+        got_bad_wt = true
+    }
+    assert(got_bad_wt)
+
+    // Invalid field number 0
+    let zero_field = ByteBuffer.new(2)
+    zero_field.write_byte(0x00)
+    let r4 = protobuf.Reader.new(zero_field)
+    let got_zero = false
+    r4.next_tag() ! {
+        assert(error_is(E.code, invalid_field_number))
+        got_zero = true
+    }
+    assert(got_zero)
+
+    // Length overflow
+    let bad_len = ByteBuffer.new(4)
+    bad_len.write_byte(0x0a) // field 1, len
+    bad_len.write_byte(0x10) // length 16, but only 2 bytes follow
+    bad_len.write_byte('a')
+    bad_len.write_byte('b')
+    let r5 = protobuf.Reader.new(bad_len)
+    let _ = r5.next_tag() ! { assert(false) return }
+    let got_len_over = false
+    r5.read_bytes() ! {
+        assert(error_is(E.code, length_overflow))
+        got_len_over = true
+    }
+    assert(got_len_over)
+
+    // Depth limit exceeded (build 6 levels deep, decode with max_depth = 3)
+    let payload = ""
+    each 0 .. 6 {
+        let w = protobuf.Writer.new(32)
+        w.write_message_bytes(1, payload)
+        payload = w.into_bytes()
+    }
+    let cur = protobuf.Reader.new(payload, 3)
+    let got_depth = false
+    each 0 .. 6 {
+        let _ = cur.next_tag() ! { assert(false) return }
+        cur = cur.read_submessage() ! {
+            assert(error_is(E.code, depth_limit))
+            got_depth = true
+            break
+        }
+    }
+    assert(got_depth)
+}
+
+test "All packed scalar types, large field numbers, bool non-1 truthiness, and binary NUL bytes" {
+    let w = protobuf.Writer.new()
+    w.write_packed_int64(1, Array[i64]{ -1, 0, 10000000000 })
+    w.write_packed_uint32(2, Array[u32]{ 0, 42, 0xffffffff })
+    w.write_packed_uint64(3, Array[u64]{ 0, 0xffffffffffffffff })
+    w.write_packed_sint64(4, Array[i64]{ -5000000000, 0, 5000000000 })
+    w.write_packed_enum(5, Array[i32]{ 0, 1, -2 })
+    w.write_packed_sfixed32(6, Array[i32]{ -1, 123456 })
+    w.write_packed_fixed64(7, Array[u64]{ 1, 0x0102030405060708 })
+    w.write_packed_sfixed64(8, Array[i64]{ -999999999999, 42 })
+    w.write_packed_float(9, Array[f32]{ -1.5, 0.0, 2.25 })
+
+    // Large field numbers including MAX_FIELD_NUMBER (536870911)
+    w.write_uint32(16, 160)
+    w.write_uint32(2048, 20480)
+    w.write_uint32(protobuf.MAX_FIELD_NUMBER, 99)
+
+    // Raw non-1 varint for bool field (proto3: any non-zero varint is true)
+    w.write_tag(50, protobuf.WireType.varint)
+    w.write_varint(2)
+
+    // Binary bytes containing embedded NUL bytes
+    let bin_buf = ByteBuffer.new(5)
+    bin_buf.write_byte(0x00)
+    bin_buf.write_byte(0x01)
+    bin_buf.write_byte(0x00)
+    bin_buf.write_byte(0xff)
+    w.write_bytes(51, bin_buf)
+
+    let bytes = w.into_bytes()
+    let r = protobuf.Reader.new(bytes)
+
+    let _ = r.next_tag() ! { assert(false) return }
+    let p1 = r.read_packed_int64() ! { assert(false) return }
+    assert(p1.length == 3 && (p1.get(0) !? 0) == -1 && (p1.get(2) !? 0) == 10000000000)
+
+    let _ = r.next_tag() ! { assert(false) return }
+    let p2 = r.read_packed_uint32() ! { assert(false) return }
+    assert(p2.length == 3 && (p2.get(2) !? 0) == 0xffffffff)
+
+    let _ = r.next_tag() ! { assert(false) return }
+    let p3 = r.read_packed_uint64() ! { assert(false) return }
+    assert(p3.length == 2 && (p3.get(1) !? 0) == 0xffffffffffffffff)
+
+    let _ = r.next_tag() ! { assert(false) return }
+    let p4 = r.read_packed_sint64() ! { assert(false) return }
+    assert(p4.length == 3 && (p4.get(0) !? 0) == -5000000000)
+
+    let _ = r.next_tag() ! { assert(false) return }
+    let p5 = r.read_packed_enum() ! { assert(false) return }
+    assert(p5.length == 3 && (p5.get(2) !? 0) == -2)
+
+    let _ = r.next_tag() ! { assert(false) return }
+    let p6 = r.read_packed_sfixed32() ! { assert(false) return }
+    assert(p6.length == 2 && (p6.get(0) !? 0) == -1)
+
+    let _ = r.next_tag() ! { assert(false) return }
+    let p7 = r.read_packed_fixed64() ! { assert(false) return }
+    assert(p7.length == 2 && (p7.get(1) !? 0) == 0x0102030405060708)
+
+    let _ = r.next_tag() ! { assert(false) return }
+    let p8 = r.read_packed_sfixed64() ! { assert(false) return }
+    assert(p8.length == 2 && (p8.get(0) !? 0) == -999999999999)
+
+    let _ = r.next_tag() ! { assert(false) return }
+    let p9 = r.read_packed_float() ! { assert(false) return }
+    assert(p9.length == 3 && (p9.get(0) !? 0.0) == -1.5 && (p9.get(2) !? 0.0) == 2.25)
+
+    let t16 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f16, _ = t16
+    assert(f16 == 16 && (r.read_uint32() ! { assert(false) return }) == 160)
+
+    let t2048 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f2048, _ = t2048
+    assert(f2048 == 2048 && (r.read_uint32() ! { assert(false) return }) == 20480)
+
+    let tmax = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let fmax, _ = tmax
+    assert(fmax == protobuf.MAX_FIELD_NUMBER && (r.read_uint32() ! { assert(false) return }) == 99)
+
+    let t50 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f50, _ = t50
+    assert(f50 == 50 && (r.read_bool() ! { assert(false) return }) == true)
+
+    let t51 = (r.next_tag() ! { assert(false) return }) ?! { assert(false) return }
+    let f51, _ = t51
+    let got_bin = r.read_bytes() ! { assert(false) return }
+    assert(f51 == 51 && got_bin.bytes == 4 && got_bin.get(0) == 0 && got_bin.get(2) == 0 && got_bin.get(3) == 0xff)
+    assert(r.is_eof)
+}
+
+test "Reader rejects truncated fixed fields and invalid wire types 4, 6, 7" {
+    let bad_wts = Array[u8]{ 4, 6, 7 }
+    each bad_wts as wt_val {
+        let b = ByteBuffer.new(1)
+        b.write_byte((1 << 3) | wt_val)
+        let r = protobuf.Reader.new(b)
+        let caught = false
+        r.next_tag() ! {
+            assert(error_is(E.code, invalid_wire_type))
+            caught = true
+        }
+        assert(caught)
+    }
+
+    // Truncated fixed32
+    let short3 = ByteBuffer.new(3)
+    short3.write_byte(1)
+    short3.write_byte(2)
+    short3.write_byte(3)
+    let r32 = protobuf.Reader.new(short3)
+    let c32 = false
+    r32.read_fixed32() ! {
+        assert(error_is(E.code, truncated))
+        c32 = true
+    }
+    assert(c32)
+
+    // Truncated fixed64
+    let r64 = protobuf.Reader.new(short3)
+    let c64 = false
+    r64.read_fixed64() ! {
+        assert(error_is(E.code, truncated))
+        c64 = true
+    }
+    assert(c64)
+
+    // Truncated skip_field
+    let rs = protobuf.Reader.new(short3)
+    let cs = false
+    rs.skip_field(protobuf.WireType.fixed32) ! {
+        assert(error_is(E.code, truncated))
+        cs = true
+    }
+    assert(cs)
+}

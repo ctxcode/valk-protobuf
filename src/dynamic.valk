@@ -1,0 +1,674 @@
+/// Discriminant for a dynamically typed protobuf field value.
++ enum DynamicKind {
+    none
+    int32
+    int64
+    uint32
+    uint64
+    float32
+    float64
+    bool_val
+    string_val
+    bytes_val
+    enum_val
+    message_val
+    list_val
+    map_val
+}
+
+/// Key/value entry inside a dynamic protobuf `map<K, V>` field.
++ class DynamicMapEntry {
+    /// Decoded map key.
+    + key: DynamicValue
+    /// Decoded map value.
+    + value: DynamicValue
+}
+
+/// Dynamically typed value stored in a `DynamicMessage`.
++ class DynamicValue {
+    /// Active value kind.
+    + kind: DynamicKind (DynamicKind.none)
+    + int32_value: i32 (0)
+    + int64_value: i64 (0)
+    + uint32_value: u32 (0)
+    + uint64_value: u64 (0)
+    + float_value: f32 (0.0)
+    + double_value: f64 (0.0)
+    + bool_value: bool (false)
+    + string_value: String ("")
+    + message_value: ?DynamicMessage (null)
+    + list_value: Array[DynamicValue] (.{})
+    + map_value: Array[DynamicMapEntry] (.{})
+
+    /// Creates an `int32` dynamic value.
+    + static fn from_int32(v: i32) DynamicValue {
+        return DynamicValue { kind: DynamicKind.int32, int32_value: v }
+    }
+
+    /// Creates an `int64` dynamic value.
+    + static fn from_int64(v: i64) DynamicValue {
+        return DynamicValue { kind: DynamicKind.int64, int64_value: v }
+    }
+
+    /// Creates a `uint32` dynamic value.
+    + static fn from_uint32(v: u32) DynamicValue {
+        return DynamicValue { kind: DynamicKind.uint32, uint32_value: v }
+    }
+
+    /// Creates a `uint64` dynamic value.
+    + static fn from_uint64(v: u64) DynamicValue {
+        return DynamicValue { kind: DynamicKind.uint64, uint64_value: v }
+    }
+
+    /// Creates a `float` dynamic value.
+    + static fn from_float(v: f32) DynamicValue {
+        return DynamicValue { kind: DynamicKind.float32, float_value: v }
+    }
+
+    /// Creates a `double` dynamic value.
+    + static fn from_double(v: f64) DynamicValue {
+        return DynamicValue { kind: DynamicKind.float64, double_value: v }
+    }
+
+    /// Creates a `bool` dynamic value.
+    + static fn from_bool(v: bool) DynamicValue {
+        return DynamicValue { kind: DynamicKind.bool_val, bool_value: v }
+    }
+
+    /// Creates a `string` dynamic value.
+    + static fn from_string(v: String) DynamicValue {
+        return DynamicValue { kind: DynamicKind.string_val, string_value: v }
+    }
+
+    /// Creates a `bytes` dynamic value.
+    + static fn from_bytes(v: String) DynamicValue {
+        return DynamicValue { kind: DynamicKind.bytes_val, string_value: v }
+    }
+
+    /// Creates an `enum` dynamic value from its numeric wire value.
+    + static fn from_enum(v: i32) DynamicValue {
+        return DynamicValue { kind: DynamicKind.enum_val, int32_value: v }
+    }
+
+    /// Creates a submessage dynamic value.
+    + static fn from_message(v: DynamicMessage) DynamicValue {
+        return DynamicValue { kind: DynamicKind.message_val, message_value: v }
+    }
+
+    /// Creates a repeated-list dynamic value.
+    + static fn from_list(items: Array[DynamicValue]) DynamicValue {
+        return DynamicValue { kind: DynamicKind.list_val, list_value: items }
+    }
+
+    /// Creates a map dynamic value.
+    + static fn from_map(entries: Array[DynamicMapEntry]) DynamicValue {
+        return DynamicValue { kind: DynamicKind.map_val, map_value: entries }
+    }
+
+    /// Returns true if two scalar keys are equal (used for map key deduplication).
+    + fn key_equals(other: DynamicValue) bool {
+        if this.kind != other.kind : return false
+        match this.kind {
+            DynamicKind.int32, DynamicKind.enum_val => return this.int32_value == other.int32_value
+            DynamicKind.int64 => return this.int64_value == other.int64_value
+            DynamicKind.uint32 => return this.uint32_value == other.uint32_value
+            DynamicKind.uint64 => return this.uint64_value == other.uint64_value
+            DynamicKind.bool_val => return this.bool_value == other.bool_value
+            DynamicKind.string_val, DynamicKind.bytes_val => return this.string_value == other.string_value
+            default => return false
+        }
+    }
+
+    /// Looks up a string-keyed entry in a `map_val`, or returns `null`.
+    + fn map_get_string(key: String) ?DynamicValue {
+        each this.map_value as entry {
+            if entry.key.kind == DynamicKind.string_val && entry.key.string_value == key {
+                return entry.value
+            }
+        }
+        return null
+    }
+
+    /// Returns true when this value equals the proto3 zero/default value for its kind.
+    fn is_zero_value() bool {
+        match this.kind {
+            DynamicKind.none => return true
+            DynamicKind.int32, DynamicKind.enum_val => return this.int32_value == 0
+            DynamicKind.int64 => return this.int64_value == 0
+            DynamicKind.uint32 => return this.uint32_value == 0
+            DynamicKind.uint64 => return this.uint64_value == 0
+            DynamicKind.float32 => return f32_to_bits(this.float_value) == 0
+            DynamicKind.float64 => return f64_to_bits(this.double_value) == 0
+            DynamicKind.bool_val => return !this.bool_value
+            DynamicKind.string_val, DynamicKind.bytes_val => return this.string_value.bytes == 0
+            DynamicKind.message_val => return !isset(this.message_value)
+            DynamicKind.list_val => return this.list_value.length == 0
+            DynamicKind.map_val => return this.map_value.length == 0
+        }
+    }
+}
+
+/// Schema-driven dynamic Protocol Buffers message that encodes and decodes without codegen.
++ class DynamicMessage is ProtoMessage {
+    /// Schema descriptor for this message.
+    + descriptor: MessageDescriptor
+    /// Optional enclosing `FileDescriptor` used to resolve sibling message and enum types.
+    + file: ?FileDescriptor (null)
+    /// Populated field values keyed by field name.
+    + fields: Map[DynamicValue] (.{})
+
+    /// Creates an empty dynamic message for `descriptor`.
+    + static fn new(descriptor: MessageDescriptor, file: ?FileDescriptor (null)) DynamicMessage {
+        return DynamicMessage {
+            descriptor: descriptor
+            file: file
+        }
+    }
+
+    /// Decodes protobuf wire bytes into a `DynamicMessage` described by `descriptor`.
+    + static fn decode(descriptor: MessageDescriptor, data: local &[u8], file: ?FileDescriptor (null)) DynamicMessage !Error {
+        let r = Reader.from_bytes(data)
+        return DynamicMessage.decode_reader(descriptor, r, file) !>
+    }
+
+    /// Decodes a `DynamicMessage` from an existing `Reader` (preserving depth limits).
+    + static fn decode_reader(descriptor: MessageDescriptor, r: Reader, file: ?FileDescriptor (null)) DynamicMessage !Error {
+        let msg = DynamicMessage.new(descriptor, file)
+        msg.merge_from_reader(r) !>
+        return msg
+    }
+
+    /// Returns true if a field named `name` has been set on this message.
+    + fn has(name: String) bool {
+        return this.fields.has(name)
+    }
+
+    /// Returns the `DynamicValue` for field `name`, or `null` if unset.
+    + fn get(name: String) ?DynamicValue {
+        return this.fields.get(name) ! return null
+    }
+
+    /// Sets field `name` to `value`, clearing sibling fields if `name` belongs to a `oneof`.
+    + fn set(name: String, value: DynamicValue) {
+        let field = this.descriptor.field_by_name(name)
+        if isset(field) && field.is_oneof {
+            this.clear_oneof(field.oneof_name)
+        }
+        this.fields.set(name, value)
+    }
+
+    /// Removes field `name` from this message.
+    + fn clear(name: String) {
+        this.fields.remove(name)
+    }
+
+    /// Sets an `int32` field.
+    + fn set_int32(name: String, v: i32) { this.set(name, DynamicValue.from_int32(v)) }
+    /// Sets an `int64` field.
+    + fn set_int64(name: String, v: i64) { this.set(name, DynamicValue.from_int64(v)) }
+    /// Sets a `uint32` field.
+    + fn set_uint32(name: String, v: u32) { this.set(name, DynamicValue.from_uint32(v)) }
+    /// Sets a `uint64` field.
+    + fn set_uint64(name: String, v: u64) { this.set(name, DynamicValue.from_uint64(v)) }
+    /// Sets a `float` field.
+    + fn set_float(name: String, v: f32) { this.set(name, DynamicValue.from_float(v)) }
+    /// Sets a `double` field.
+    + fn set_double(name: String, v: f64) { this.set(name, DynamicValue.from_double(v)) }
+    /// Sets a `bool` field.
+    + fn set_bool(name: String, v: bool) { this.set(name, DynamicValue.from_bool(v)) }
+    /// Sets a `string` field.
+    + fn set_string(name: String, v: String) { this.set(name, DynamicValue.from_string(v)) }
+    /// Sets a `bytes` field.
+    + fn set_bytes(name: String, v: String) { this.set(name, DynamicValue.from_bytes(v)) }
+    /// Sets an `enum` field by numeric value.
+    + fn set_enum(name: String, v: i32) { this.set(name, DynamicValue.from_enum(v)) }
+    /// Sets a submessage field.
+    + fn set_message(name: String, v: DynamicMessage) { this.set(name, DynamicValue.from_message(v)) }
+    /// Sets a repeated list field.
+    + fn set_list(name: String, v: Array[DynamicValue]) { this.set(name, DynamicValue.from_list(v)) }
+
+    /// Inserts or updates a key/value pair on a `map<K, V>` field.
+    + fn set_map_entry(name: String, key: DynamicValue, value: DynamicValue) {
+        let existing = this.get(name)
+        if isset(existing) && existing.kind == DynamicKind.map_val {
+            upsert_map_entry(existing.map_value, key, value)
+            return
+        }
+        let entries = Array[DynamicMapEntry]{}
+        entries.append(DynamicMapEntry { key: key, value: value })
+        this.fields.set(name, DynamicValue.from_map(entries))
+    }
+
+    /// Gets an `int32` field or `0` if unset.
+    + fn get_int32(name: String) i32 {
+        let v = this.get(name)
+        return isset(v) ? v.int32_value : 0
+    }
+
+    /// Gets an `int64` field or `0` if unset.
+    + fn get_int64(name: String) i64 {
+        let v = this.get(name)
+        return isset(v) ? v.int64_value : 0
+    }
+
+    /// Gets a `uint32` field or `0` if unset.
+    + fn get_uint32(name: String) u32 {
+        let v = this.get(name)
+        return isset(v) ? v.uint32_value : 0
+    }
+
+    /// Gets a `uint64` field or `0` if unset.
+    + fn get_uint64(name: String) u64 {
+        let v = this.get(name)
+        return isset(v) ? v.uint64_value : 0
+    }
+
+    /// Gets a `float` field or `0.0` if unset.
+    + fn get_float(name: String) f32 {
+        let v = this.get(name)
+        return isset(v) ? v.float_value : 0.0
+    }
+
+    /// Gets a `double` field or `0.0` if unset.
+    + fn get_double(name: String) f64 {
+        let v = this.get(name)
+        return isset(v) ? v.double_value : 0.0
+    }
+
+    /// Gets a `bool` field or `false` if unset.
+    + fn get_bool(name: String) bool {
+        let v = this.get(name)
+        return isset(v) ? v.bool_value : false
+    }
+
+    /// Gets a `string` or `bytes` field or `""` if unset.
+    + fn get_string(name: String) String {
+        let v = this.get(name)
+        return isset(v) ? v.string_value : ""
+    }
+
+    /// Gets an `enum` numeric value or `0` if unset.
+    + fn get_enum(name: String) i32 {
+        let v = this.get(name)
+        return isset(v) ? v.int32_value : 0
+    }
+
+    /// Gets a submessage field or `null` if unset.
+    + fn get_message(name: String) ?DynamicMessage {
+        let v = this.get(name)
+        return isset(v) ? v.message_value : null
+    }
+
+    /// Gets a repeated list field (returns an empty array if unset).
+    + fn get_list(name: String) Array[DynamicValue] {
+        let v = this.get(name)
+        return isset(v) ? v.list_value : Array[DynamicValue]{}
+    }
+
+    /// Gets a map field's entries (returns an empty array if unset).
+    + fn get_map(name: String) Array[DynamicMapEntry] {
+        let v = this.get(name)
+        return isset(v) ? v.map_value : Array[DynamicMapEntry]{}
+    }
+
+    /// Encodes this dynamic message into protobuf wire bytes.
+    + fn encode() String {
+        return this.to_proto_bytes()
+    }
+
+    /// Implements `ProtoMessage.to_proto_bytes`.
+    + fn to_proto_bytes() String {
+        let w = Writer.new(128)
+        this.encode_proto(w)
+        return w.into_bytes()
+    }
+
+    /// Implements `ProtoMessage.encode_proto`.
+    + fn encode_proto(w: Writer) {
+        each this.descriptor.fields as field {
+            let val = this.get(field.name)
+            if !isset(val) : continue
+
+            if field.is_map {
+                this.encode_map_field(w, field, val)
+                continue
+            }
+
+            if field.is_repeated {
+                this.encode_repeated_field(w, field, val)
+                continue
+            }
+
+            // Proto3 omits default values for implicit-presence singular fields
+            let explicit_presence = field.is_optional || field.is_oneof || val.kind == DynamicKind.message_val
+            if !explicit_presence && val.is_zero_value() : continue
+
+            this.encode_single_value(w, field.number, field.type_name, val)
+        }
+    }
+
+    fn clear_oneof(oneof_name: String) {
+        each this.descriptor.fields as f {
+            if f.oneof_name == oneof_name {
+                this.fields.remove(f.name)
+            }
+        }
+    }
+
+    fn resolve_message(type_name: String) ?MessageDescriptor {
+        let nested = this.descriptor.find_message(type_name)
+        if isset(nested) : return nested
+        let f = this.file
+        if isset(f) : return f.find_message(type_name)
+        return null
+    }
+
+    fn resolve_enum(type_name: String) ?EnumDescriptor {
+        let nested = this.descriptor.find_enum(type_name)
+        if isset(nested) : return nested
+        let f = this.file
+        if isset(f) : return f.find_enum(type_name)
+        return null
+    }
+
+    fn is_enum_type(type_name: String) bool {
+        if is_scalar_type(type_name) : return false
+        if isset(this.resolve_enum(type_name)) : return true
+        return false
+    }
+
+    fn encode_single_value(w: Writer, field_num: u32, type_name: String, val: DynamicValue) {
+        match type_name {
+            "int32" => w.write_int32(field_num, val.int32_value)
+            "int64" => w.write_int64(field_num, val.int64_value)
+            "uint32" => w.write_uint32(field_num, val.uint32_value)
+            "uint64" => w.write_uint64(field_num, val.uint64_value)
+            "sint32" => w.write_sint32(field_num, val.int32_value)
+            "sint64" => w.write_sint64(field_num, val.int64_value)
+            "bool" => w.write_bool(field_num, val.bool_value)
+            "fixed32" => w.write_fixed32(field_num, val.uint32_value)
+            "sfixed32" => w.write_sfixed32(field_num, val.int32_value)
+            "fixed64" => w.write_fixed64(field_num, val.uint64_value)
+            "sfixed64" => w.write_sfixed64(field_num, val.int64_value)
+            "float" => w.write_float(field_num, val.float_value)
+            "double" => w.write_double(field_num, val.double_value)
+            "string" => w.write_string(field_num, val.string_value)
+            "bytes" => w.write_bytes(field_num, val.string_value)
+            default => {
+                if val.kind == DynamicKind.message_val {
+                    let sub = val.message_value ?! return
+                    w.write_message(field_num, sub)
+                } else {
+                    w.write_enum(field_num, val.int32_value)
+                }
+            }
+        }
+    }
+
+    fn encode_raw_packable(w: Writer, type_name: String, val: DynamicValue) {
+        match type_name {
+            "int32" => w.write_raw_int32(val.int32_value)
+            "int64" => w.write_raw_int64(val.int64_value)
+            "uint32" => w.write_raw_uint32(val.uint32_value)
+            "uint64" => w.write_raw_uint64(val.uint64_value)
+            "sint32" => w.write_raw_sint32(val.int32_value)
+            "sint64" => w.write_raw_sint64(val.int64_value)
+            "bool" => w.write_raw_bool(val.bool_value)
+            "fixed32" => w.write_raw_fixed32(val.uint32_value)
+            "sfixed32" => w.write_raw_sfixed32(val.int32_value)
+            "fixed64" => w.write_raw_fixed64(val.uint64_value)
+            "sfixed64" => w.write_raw_sfixed64(val.int64_value)
+            "float" => w.write_raw_float(val.float_value)
+            "double" => w.write_raw_double(val.double_value)
+            default => w.write_raw_enum(val.int32_value)
+        }
+    }
+
+    fn encode_repeated_field(w: Writer, field: FieldDescriptor, val: DynamicValue) {
+        let items = val.list_value
+        if items.length == 0 : return
+
+        let can_pack = is_packable_scalar(field.type_name) || this.is_enum_type(field.type_name)
+        let opt = field.get_option("packed")
+        let use_packed = can_pack && (!isset(opt) || opt == "true")
+
+        if use_packed {
+            let sub = Writer.new(items.length * 4)
+            each items as item {
+                this.encode_raw_packable(sub, field.type_name, item)
+            }
+            w.write_tag(field.number, WireType.len)
+            w.write_raw_bytes(sub.buffer)
+            return
+        }
+
+        each items as item {
+            this.encode_single_value(w, field.number, field.type_name, item)
+        }
+    }
+
+    fn encode_map_field(w: Writer, field: FieldDescriptor, val: DynamicValue) {
+        each val.map_value as entry {
+            let sub = Writer.new(32)
+            if !entry.key.is_zero_value() {
+                this.encode_single_value(sub, 1, field.map_key_type, entry.key)
+            }
+            if !entry.value.is_zero_value() || entry.value.kind == DynamicKind.message_val {
+                this.encode_single_value(sub, 2, field.map_value_type, entry.value)
+            }
+            w.write_tag(field.number, WireType.len)
+            w.write_raw_bytes(sub.buffer)
+        }
+    }
+
+    fn merge_from_reader(r: Reader) !Error {
+        while true {
+            let tag = (r.next_tag() !>) ?! break
+            let field_num, wt = tag
+            let field = this.descriptor.field_by_number(field_num)
+            if !isset(field) {
+                r.skip_field(wt) !>
+                continue
+            }
+
+            if field.is_map {
+                if wt != WireType.len {
+                    throw .wire_type_mismatch {
+                        message: "Expected length-delimited wire type for map field '%{field.name}'"
+                        offset: r.pos
+                    }
+                }
+                let entry_reader = r.read_submessage() !>
+                let k, v = this.decode_map_entry(field, entry_reader) !>
+                this.set_map_entry(field.name, k, v)
+                continue
+            }
+
+            if field.is_repeated {
+                this.decode_repeated_into(field, wt, r) !>
+                continue
+            }
+
+            // Singular (or oneof) field
+            if field.is_oneof {
+                this.clear_oneof(field.oneof_name)
+            }
+
+            if !is_scalar_type(field.type_name) && !this.is_enum_type(field.type_name) && wt == WireType.len {
+                let sub_desc = this.resolve_message(field.type_name)
+                if !isset(sub_desc) {
+                    throw .unknown_type {
+                        message: "Unknown message type '%{field.type_name}' for field '%{field.name}'"
+                        offset: r.pos
+                    }
+                }
+                let sub_reader = r.read_submessage() !>
+                // Proto3 merge semantics for repeated occurrences of singular submessage
+                let prev = this.get_message(field.name)
+                if isset(prev) {
+                    prev.merge_from_reader(sub_reader) !>
+                } else {
+                    let sub_msg = DynamicMessage.decode_reader(sub_desc, sub_reader, this.file) !>
+                    this.fields.set(field.name, DynamicValue.from_message(sub_msg))
+                }
+                continue
+            }
+
+            let decoded = this.decode_single_value(field.type_name, wt, r) !>
+            this.fields.set(field.name, decoded)
+        }
+    }
+
+    fn decode_repeated_into(field: FieldDescriptor, wt: WireType, r: Reader) !Error {
+        let list_val = this.get(field.name)
+        let items: Array[DynamicValue] = isset(list_val) ? list_val.list_value : Array[DynamicValue]{}
+        if !isset(list_val) {
+            this.fields.set(field.name, DynamicValue.from_list(items))
+        }
+
+        let packable = is_packable_scalar(field.type_name) || this.is_enum_type(field.type_name)
+        if packable && wt == WireType.len {
+            let sub = r.read_submessage() !>
+            let elem_wt = scalar_wire_type(field.type_name) ?? WireType.varint
+            while !sub.is_eof {
+                items.append(this.decode_single_value(field.type_name, elem_wt, sub) !>)
+            }
+            return
+        }
+
+        items.append(this.decode_single_value(field.type_name, wt, r) !>)
+    }
+
+    fn decode_map_entry(field: FieldDescriptor, r: Reader) (DynamicValue, DynamicValue) !Error {
+        let key = default_dynamic_value(field.map_key_type)
+        let val = default_dynamic_value(field.map_value_type)
+        while true {
+            let tag = (r.next_tag() !>) ?! break
+            let num, wt = tag
+            if num == 1 {
+                key = this.decode_single_value(field.map_key_type, wt, r) !>
+            } else if num == 2 {
+                val = this.decode_single_value(field.map_value_type, wt, r) !>
+            } else {
+                r.skip_field(wt) !>
+            }
+        }
+        return (key, val)
+    }
+
+    fn decode_single_value(type_name: String, wt: WireType, r: Reader) DynamicValue !Error {
+        match type_name {
+            "int32" => {
+                expect_wire_type(wt, WireType.varint, type_name, r.pos) !>
+                return DynamicValue.from_int32(r.read_int32() !>)
+            }
+            "int64" => {
+                expect_wire_type(wt, WireType.varint, type_name, r.pos) !>
+                return DynamicValue.from_int64(r.read_int64() !>)
+            }
+            "uint32" => {
+                expect_wire_type(wt, WireType.varint, type_name, r.pos) !>
+                return DynamicValue.from_uint32(r.read_uint32() !>)
+            }
+            "uint64" => {
+                expect_wire_type(wt, WireType.varint, type_name, r.pos) !>
+                return DynamicValue.from_uint64(r.read_uint64() !>)
+            }
+            "sint32" => {
+                expect_wire_type(wt, WireType.varint, type_name, r.pos) !>
+                return DynamicValue.from_int32(r.read_sint32() !>)
+            }
+            "sint64" => {
+                expect_wire_type(wt, WireType.varint, type_name, r.pos) !>
+                return DynamicValue.from_int64(r.read_sint64() !>)
+            }
+            "bool" => {
+                expect_wire_type(wt, WireType.varint, type_name, r.pos) !>
+                return DynamicValue.from_bool(r.read_bool() !>)
+            }
+            "fixed32" => {
+                expect_wire_type(wt, WireType.fixed32, type_name, r.pos) !>
+                return DynamicValue.from_uint32(r.read_fixed32() !>)
+            }
+            "sfixed32" => {
+                expect_wire_type(wt, WireType.fixed32, type_name, r.pos) !>
+                return DynamicValue.from_int32(r.read_sfixed32() !>)
+            }
+            "fixed64" => {
+                expect_wire_type(wt, WireType.fixed64, type_name, r.pos) !>
+                return DynamicValue.from_uint64(r.read_fixed64() !>)
+            }
+            "sfixed64" => {
+                expect_wire_type(wt, WireType.fixed64, type_name, r.pos) !>
+                return DynamicValue.from_int64(r.read_sfixed64() !>)
+            }
+            "float" => {
+                expect_wire_type(wt, WireType.fixed32, type_name, r.pos) !>
+                return DynamicValue.from_float(r.read_float() !>)
+            }
+            "double" => {
+                expect_wire_type(wt, WireType.fixed64, type_name, r.pos) !>
+                return DynamicValue.from_double(r.read_double() !>)
+            }
+            "string" => {
+                expect_wire_type(wt, WireType.len, type_name, r.pos) !>
+                return DynamicValue.from_string(r.read_string() !>)
+            }
+            "bytes" => {
+                expect_wire_type(wt, WireType.len, type_name, r.pos) !>
+                return DynamicValue.from_bytes(r.read_bytes() !>)
+            }
+            default => {
+                let sub_desc = this.resolve_message(type_name)
+                if isset(sub_desc) {
+                    expect_wire_type(wt, WireType.len, type_name, r.pos) !>
+                    let sub_reader = r.read_submessage() !>
+                    let sub_msg = DynamicMessage.decode_reader(sub_desc, sub_reader, this.file) !>
+                    return DynamicValue.from_message(sub_msg)
+                }
+                if this.is_enum_type(type_name) || wt == WireType.varint {
+                    expect_wire_type(wt, WireType.varint, type_name, r.pos) !>
+                    return DynamicValue.from_enum(r.read_enum() !>)
+                }
+                throw .unknown_type {
+                    message: "Unknown protobuf type '%{type_name}'"
+                    offset: r.pos
+                }
+            }
+        }
+    }
+}
+
+fn expect_wire_type(actual: WireType, expected: WireType, type_name: String, offset: uint) !Error {
+    if actual != expected {
+        throw .wire_type_mismatch {
+            message: "Wire type mismatch for '%{type_name}'"
+            offset: offset
+        }
+    }
+}
+
+fn upsert_map_entry(entries: Array[DynamicMapEntry], key: DynamicValue, value: DynamicValue) {
+    each entries as entry {
+        if entry.key.key_equals(key) {
+            entry.value = value
+            return
+        }
+    }
+    entries.append(DynamicMapEntry { key: key, value: value })
+}
+
+fn default_dynamic_value(type_name: String) DynamicValue {
+    match type_name {
+        "int32", "sint32", "sfixed32" => return DynamicValue.from_int32(0)
+        "int64", "sint64", "sfixed64" => return DynamicValue.from_int64(0)
+        "uint32", "fixed32" => return DynamicValue.from_uint32(0)
+        "uint64", "fixed64" => return DynamicValue.from_uint64(0)
+        "float" => return DynamicValue.from_float(0.0)
+        "double" => return DynamicValue.from_double(0.0)
+        "bool" => return DynamicValue.from_bool(false)
+        "string" => return DynamicValue.from_string("")
+        "bytes" => return DynamicValue.from_bytes("")
+        default => return DynamicValue.from_enum(0)
+    }
+}

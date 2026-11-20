@@ -1,0 +1,249 @@
+use protobuf
+
+test "Parse full proto3 schema with packages, imports, options, nested types, oneof, map, reserved, services" {
+    let schema = "
+// File doc comment
+syntax = \"proto3\";
+
+package acme.billing.v1;
+
+import \"google/protobuf/timestamp.proto\";
+import public \"common/money.proto\";
+import weak \"legacy/old.proto\";
+
+option go_package = \"github.com/acme/billing/v1;billingv1\";
+option optimize_for = SPEED;
+
+/* Multi-line block comment
+ * describing AccountStatus
+ */
+enum AccountStatus {
+    option allow_alias = true;
+    reserved 99, 100 to 110;
+    reserved \"LEGACY_STATUS\";
+
+    // Default unknown status
+    ACCOUNT_STATUS_UNSPECIFIED = 0;
+    ACCOUNT_STATUS_ACTIVE = 1;
+    ACCOUNT_STATUS_ENABLED = 1 [deprecated = true];
+    ACCOUNT_STATUS_SUSPENDED = -1;
+}
+
+// Customer account record
+message Account {
+    reserved 50, 60 to 70, 90 to max;
+    reserved \"old_code\", \"legacy_pin\";
+
+    // Nested address message
+    message Address {
+        string street = 1;
+        string city = 2;
+        enum Kind {
+            KIND_UNSPECIFIED = 0;
+            KIND_HOME = 1;
+            KIND_WORK = 2;
+        }
+        Kind kind = 3;
+    }
+
+    // Account identifier
+    int64 id = 1; // trailing comment ignored as doc for next field
+    string email = 2;
+    optional string nickname = 3;
+    AccountStatus status = 4;
+    repeated string tags = 5;
+    repeated int32 scores = 6 [packed = true];
+    repeated int32 raw_scores = 7 [packed = false, deprecated = true];
+    map<string, int32> quotas = 8;
+    map<int64, Address> addresses = 9;
+    Address primary_address = 10;
+
+    // Contact method choice
+    oneof contact {
+        string phone = 11;
+        string webhook_url = 12;
+    }
+
+    // Contextual keywords as field names
+    string message = 13;
+    int32 option = 14;
+    bool optional = 15;
+}
+
+message GetAccountRequest {
+    int64 id = 1;
+}
+
+message ListAccountsRequest {
+    int32 page_size = 1;
+}
+
+// Billing RPC service
+service BillingService {
+    // Fetch a single account
+    rpc GetAccount(GetAccountRequest) returns (Account);
+    rpc StreamAccounts(ListAccountsRequest) returns (stream Account) {
+        option deprecated = true;
+    }
+    rpc UploadEvents(stream Account) returns (GetAccountRequest);
+    rpc Sync(stream Account) returns (stream Account);
+}
+"
+
+    let file = protobuf.parse_proto(schema) ! {
+        println("Parse error at %{E.line}:%{E.column}: %{E.message}")
+        assert(false)
+        return
+    }
+
+    assert(file.syntax == "proto3")
+    assert(file.package_name == "acme.billing.v1")
+    assert(file.doc == "File doc comment")
+
+    // Imports
+    assert(file.imports.length == 3)
+    let imp0 = file.imports.get(0) ! { assert(false) return }
+    assert(imp0.path == "google/protobuf/timestamp.proto" && !imp0.is_public && !imp0.is_weak)
+    let imp1 = file.imports.get(1) ! { assert(false) return }
+    assert(imp1.path == "common/money.proto" && imp1.is_public)
+    let imp2 = file.imports.get(2) ! { assert(false) return }
+    assert(imp2.path == "legacy/old.proto" && imp2.is_weak)
+
+    // File options
+    assert((file.get_option("go_package") ?? "") == "github.com/acme/billing/v1;billingv1")
+    assert((file.get_option("optimize_for") ?? "") == "SPEED")
+
+    // Top-level enum
+    let status = file.find_enum("AccountStatus") ?! { assert(false) return }
+    assert(status.allow_alias)
+    assert(status.doc.contains("describing AccountStatus"))
+    assert(status.values.length == 4)
+    assert(status.reserved_ranges.length == 2)
+    assert(status.reserved_names.length == 1)
+    let v_neg = status.value_by_name("ACCOUNT_STATUS_SUSPENDED") ?! { assert(false) return }
+    assert(v_neg.number == -1)
+
+    // Message & nested types
+    let acct = file.find_message("Account") ?! { assert(false) return }
+    assert(acct.doc == "Customer account record")
+    assert(acct.reserved_ranges.length == 3)
+    assert(acct.reserved_names.length == 2)
+    assert(acct.nested_messages.length == 1)
+
+    let addr = file.find_message("Account.Address") ?! { assert(false) return }
+    assert(addr.doc == "Nested address message")
+    assert(addr.nested_enums.length == 1)
+    let kind_enum = file.find_enum(".acme.billing.v1.Account.Address.Kind") ?! { assert(false) return }
+    assert(kind_enum.values.length == 3)
+
+    // Fields
+    let f_id = acct.field_by_number(1) ?! { assert(false) return }
+    assert(f_id.name == "id" && f_id.type_name == "int64" && f_id.doc == "Account identifier")
+    let f_email = acct.field_by_number(2) ?! { assert(false) return }
+    assert(f_email.name == "email" && f_email.doc == "")
+    let f_nick = acct.field_by_name("nickname") ?! { assert(false) return }
+    assert(f_nick.is_optional)
+    let f_scores = acct.field_by_name("scores") ?! { assert(false) return }
+    assert(f_scores.is_repeated && f_scores.is_packed)
+    let f_raw = acct.field_by_name("raw_scores") ?! { assert(false) return }
+    assert(f_raw.is_repeated && !f_raw.is_packed && f_raw.is_deprecated)
+
+    // Maps
+    let f_quotas = acct.field_by_name("quotas") ?! { assert(false) return }
+    assert(f_quotas.is_map && f_quotas.map_key_type == "string" && f_quotas.map_value_type == "int32")
+    let f_addrs = acct.field_by_name("addresses") ?! { assert(false) return }
+    assert(f_addrs.is_map && f_addrs.map_key_type == "int64" && f_addrs.map_value_type == "Address")
+
+    // Oneof
+    assert(acct.oneofs.length == 1)
+    let contact = acct.oneofs.get(0) ! { assert(false) return }
+    assert(contact.name == "contact" && contact.fields.length == 2)
+    let f_phone = acct.field_by_name("phone") ?! { assert(false) return }
+    assert(f_phone.is_oneof && f_phone.oneof_name == "contact")
+
+    // Contextual keywords as field names
+    assert(isset(acct.field_by_name("message")))
+    assert(isset(acct.field_by_name("option")))
+    assert(isset(acct.field_by_name("optional")))
+
+    // Service & RPCs
+    assert(file.services.length == 1)
+    let svc = file.services.get(0) ! { assert(false) return }
+    assert(svc.name == "BillingService" && svc.doc == "Billing RPC service")
+    assert(svc.methods.length == 4)
+
+    let m0 = svc.methods.get(0) ! { assert(false) return }
+    assert(m0.name == "GetAccount" && !m0.client_streaming && !m0.server_streaming)
+    let m1 = svc.methods.get(1) ! { assert(false) return }
+    assert(m1.name == "StreamAccounts" && !m1.client_streaming && m1.server_streaming && m1.options.length == 1)
+    let m2 = svc.methods.get(2) ! { assert(false) return }
+    assert(m2.name == "UploadEvents" && m2.client_streaming && !m2.server_streaming)
+    let m3 = svc.methods.get(3) ! { assert(false) return }
+    assert(m3.name == "Sync" && m3.client_streaming && m3.server_streaming)
+}
+
+test "Parser reports syntax errors with line and column" {
+    // Invalid map key type (float not allowed in protobuf)
+    let err1 = false
+    protobuf.parse_proto("syntax = \"proto3\";\nmessage Bad {\n  map<float, string> m = 1;\n}") ! {
+        assert(error_is(E.code, syntax_error))
+        assert(E.line == 3)
+        err1 = true
+    }
+    assert(err1)
+
+    // Field number 0
+    let err2 = false
+    protobuf.parse_proto("syntax = \"proto3\";\nmessage Bad {\n  int32 x = 0;\n}") ! {
+        assert(error_is(E.code, invalid_field_number))
+        assert(E.line == 3)
+        err2 = true
+    }
+    assert(err2)
+
+    // Unterminated block comment
+    let err3 = false
+    protobuf.parse_proto("/* unclosed comment") ! {
+        assert(error_is(E.code, syntax_error))
+        err3 = true
+    }
+    assert(err3)
+}
+
+test "Parser handles custom parenthesized options, aggregate options, string escapes, and hex enum values" {
+    let schema = "
+syntax = 'proto3';
+package custom.opts;
+
+option (my.pkg.file_opt).label = \"hello\" \" \" \"world\\n\\x41\\102\";
+option (my.pkg.http_cfg) = { get: \"/v1/items\" timeout_ms: 500 };
+
+enum Flags {
+    ;
+    FLAGS_NONE = 0;
+    FLAGS_HEX = 0x10;
+}
+
+message Item {
+    ;
+    string name = 1 [(my.pkg.validate) = { min_len: 1 }];
+}
+"
+    let file = protobuf.parse_proto(schema) ! {
+        println("Parse error: %{E.message}")
+        assert(false)
+        return
+    }
+    assert(file.syntax == "proto3")
+    assert((file.get_option("(my.pkg.file_opt).label") ?? "") == "hello world\nAB")
+    let agg = file.get_option("(my.pkg.http_cfg)") ?? ""
+    assert(agg.contains("/v1/items") && agg.contains("500"))
+
+    let flags = file.find_enum("Flags") ?! { assert(false) return }
+    let hex_v = flags.value_by_name("FLAGS_HEX") ?! { assert(false) return }
+    assert(hex_v.number == 16)
+
+    let item = file.find_message("Item") ?! { assert(false) return }
+    let fname = item.field_by_name("name") ?! { assert(false) return }
+    assert(isset(fname.get_option("(my.pkg.validate)")))
+}

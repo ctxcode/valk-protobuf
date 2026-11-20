@@ -1,0 +1,366 @@
+/// Streaming Protocol Buffers wire-format writer backed by a `ByteBuffer`.
++ class Writer {
+    /// Underlying output byte buffer.
+    + buffer: ByteBuffer
+
+    /// Creates a new writer with an initial buffer capacity.
+    + static fn new(capacity: uint (128)) Writer {
+        return Writer { buffer: ByteBuffer.new(capacity) }
+    }
+
+    /// Creates a writer that appends directly into an existing `ByteBuffer`.
+    + static fn to_buffer(buffer: ByteBuffer) Writer {
+        return Writer { buffer: buffer }
+    }
+
+    /// Returns the number of bytes written so far.
+    + get length: uint {
+        return this.buffer.length
+    }
+
+    /// Clears all written bytes while keeping the allocated buffer capacity.
+    + fn reset() {
+        this.buffer.clear()
+    }
+
+    /// Returns a copy of the written wire bytes as a `String`.
+    + fn to_bytes() String {
+        return this.buffer.to_string()
+    }
+
+    /// Consumes the buffer and returns the written wire bytes as a `String`.
+    + fn into_bytes() String {
+        return this.buffer.into_string()
+    }
+
+    /// Writes a raw unsigned 64-bit base-128 varint (LEB128).
+    + fn write_varint(v: u64) {
+        let val = v
+        while val >= 0x80 {
+            this.buffer.write_byte(((val & 0x7f) | 0x80).to(u8))
+            val = val >> 7
+        }
+        this.buffer.write_byte(val.to(u8))
+    }
+
+    /// Writes a field tag `(field << 3) | wire_type`.
+    + fn write_tag(field: u32, wire_type: WireType) {
+        this.write_varint(make_tag(field, wire_type).to(u64))
+    }
+
+    /// Writes a raw `int32` varint (sign-extended to 64 bits for negative values per protobuf spec).
+    + fn write_raw_int32(v: i32) {
+        this.write_varint(v.to(i64).to(u64))
+    }
+
+    /// Writes a raw `int64` varint.
+    + fn write_raw_int64(v: i64) {
+        this.write_varint(v.to(u64))
+    }
+
+    /// Writes a raw `uint32` varint.
+    + fn write_raw_uint32(v: u32) {
+        this.write_varint(v.to(u64))
+    }
+
+    /// Writes a raw `uint64` varint.
+    + fn write_raw_uint64(v: u64) {
+        this.write_varint(v)
+    }
+
+    /// Writes a raw ZigZag-encoded `sint32` varint.
+    + fn write_raw_sint32(v: i32) {
+        this.write_varint(zigzag_encode32(v).to(u64))
+    }
+
+    /// Writes a raw ZigZag-encoded `sint64` varint.
+    + fn write_raw_sint64(v: i64) {
+        this.write_varint(zigzag_encode64(v))
+    }
+
+    /// Writes a raw `bool` varint (`0` or `1`).
+    + fn write_raw_bool(v: bool) {
+        this.buffer.write_byte(v ? 1 : 0)
+    }
+
+    /// Writes a raw `enum` value as a sign-extended varint.
+    + fn write_raw_enum(v: i32) {
+        this.write_varint(v.to(i64).to(u64))
+    }
+
+    /// Writes a raw little-endian 32-bit unsigned integer.
+    + fn write_raw_fixed32(v: u32) {
+        this.buffer.write_u32_le(v)
+    }
+
+    /// Writes a raw little-endian 32-bit signed integer.
+    + fn write_raw_sfixed32(v: i32) {
+        this.buffer.write_u32_le(v.to(u32))
+    }
+
+    /// Writes a raw little-endian 64-bit unsigned integer.
+    + fn write_raw_fixed64(v: u64) {
+        this.buffer.write_u64_le(v)
+    }
+
+    /// Writes a raw little-endian 64-bit signed integer.
+    + fn write_raw_sfixed64(v: i64) {
+        this.buffer.write_u64_le(v.to(u64))
+    }
+
+    /// Writes a raw little-endian IEEE-754 32-bit float.
+    + fn write_raw_float(v: f32) {
+        this.buffer.write_u32_le(f32_to_bits(v))
+    }
+
+    /// Writes a raw little-endian IEEE-754 64-bit double.
+    + fn write_raw_double(v: f64) {
+        this.buffer.write_u64_le(f64_to_bits(v))
+    }
+
+    /// Writes a length-prefixed byte slice (length varint followed by raw bytes).
+    + fn write_raw_bytes(data: local &[u8]) {
+        this.write_varint(data.length.to(u64))
+        if data.length > 0 : this.buffer.write(data)
+    }
+
+    // --- Tagged field writers ---
+
+    /// Writes a tagged `int32` field.
+    + fn write_int32(field: u32, v: i32) {
+        this.write_tag(field, WireType.varint)
+        this.write_raw_int32(v)
+    }
+
+    /// Writes a tagged `int64` field.
+    + fn write_int64(field: u32, v: i64) {
+        this.write_tag(field, WireType.varint)
+        this.write_raw_int64(v)
+    }
+
+    /// Writes a tagged `uint32` field.
+    + fn write_uint32(field: u32, v: u32) {
+        this.write_tag(field, WireType.varint)
+        this.write_raw_uint32(v)
+    }
+
+    /// Writes a tagged `uint64` field.
+    + fn write_uint64(field: u32, v: u64) {
+        this.write_tag(field, WireType.varint)
+        this.write_raw_uint64(v)
+    }
+
+    /// Writes a tagged ZigZag `sint32` field.
+    + fn write_sint32(field: u32, v: i32) {
+        this.write_tag(field, WireType.varint)
+        this.write_raw_sint32(v)
+    }
+
+    /// Writes a tagged ZigZag `sint64` field.
+    + fn write_sint64(field: u32, v: i64) {
+        this.write_tag(field, WireType.varint)
+        this.write_raw_sint64(v)
+    }
+
+    /// Writes a tagged `bool` field.
+    + fn write_bool(field: u32, v: bool) {
+        this.write_tag(field, WireType.varint)
+        this.write_raw_bool(v)
+    }
+
+    /// Writes a tagged `enum` field.
+    + fn write_enum(field: u32, v: i32) {
+        this.write_tag(field, WireType.varint)
+        this.write_raw_enum(v)
+    }
+
+    /// Writes a tagged `fixed32` field.
+    + fn write_fixed32(field: u32, v: u32) {
+        this.write_tag(field, WireType.fixed32)
+        this.write_raw_fixed32(v)
+    }
+
+    /// Writes a tagged `sfixed32` field.
+    + fn write_sfixed32(field: u32, v: i32) {
+        this.write_tag(field, WireType.fixed32)
+        this.write_raw_sfixed32(v)
+    }
+
+    /// Writes a tagged `fixed64` field.
+    + fn write_fixed64(field: u32, v: u64) {
+        this.write_tag(field, WireType.fixed64)
+        this.write_raw_fixed64(v)
+    }
+
+    /// Writes a tagged `sfixed64` field.
+    + fn write_sfixed64(field: u32, v: i64) {
+        this.write_tag(field, WireType.fixed64)
+        this.write_raw_sfixed64(v)
+    }
+
+    /// Writes a tagged `float` field.
+    + fn write_float(field: u32, v: f32) {
+        this.write_tag(field, WireType.fixed32)
+        this.write_raw_float(v)
+    }
+
+    /// Writes a tagged `double` field.
+    + fn write_double(field: u32, v: f64) {
+        this.write_tag(field, WireType.fixed64)
+        this.write_raw_double(v)
+    }
+
+    /// Writes a tagged `string` field.
+    + fn write_string(field: u32, v: local &[u8]) {
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(v)
+    }
+
+    /// Writes a tagged `bytes` field.
+    + fn write_bytes(field: u32, v: local &[u8]) {
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(v)
+    }
+
+    /// Writes an embedded message field implementing `ProtoMessage`.
+    + fn write_message(field: u32, msg: ProtoMessage) {
+        let sub = Writer.new(64)
+        msg.encode_proto(sub)
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(sub.buffer)
+    }
+
+    /// Writes pre-encoded bytes as an embedded message field.
+    + fn write_message_bytes(field: u32, data: local &[u8]) {
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(data)
+    }
+
+    // --- Packed repeated scalar field writers ---
+
+    /// Writes a packed repeated `int32` field. Empty arrays emit nothing.
+    + fn write_packed_int32(field: u32, values: Array[i32]) {
+        if values.length == 0 : return
+        let sub = Writer.new(values.length * 2)
+        each values as v : sub.write_raw_int32(v)
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(sub.buffer)
+    }
+
+    /// Writes a packed repeated `int64` field. Empty arrays emit nothing.
+    + fn write_packed_int64(field: u32, values: Array[i64]) {
+        if values.length == 0 : return
+        let sub = Writer.new(values.length * 2)
+        each values as v : sub.write_raw_int64(v)
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(sub.buffer)
+    }
+
+    /// Writes a packed repeated `uint32` field. Empty arrays emit nothing.
+    + fn write_packed_uint32(field: u32, values: Array[u32]) {
+        if values.length == 0 : return
+        let sub = Writer.new(values.length * 2)
+        each values as v : sub.write_raw_uint32(v)
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(sub.buffer)
+    }
+
+    /// Writes a packed repeated `uint64` field. Empty arrays emit nothing.
+    + fn write_packed_uint64(field: u32, values: Array[u64]) {
+        if values.length == 0 : return
+        let sub = Writer.new(values.length * 2)
+        each values as v : sub.write_raw_uint64(v)
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(sub.buffer)
+    }
+
+    /// Writes a packed repeated `sint32` field. Empty arrays emit nothing.
+    + fn write_packed_sint32(field: u32, values: Array[i32]) {
+        if values.length == 0 : return
+        let sub = Writer.new(values.length * 2)
+        each values as v : sub.write_raw_sint32(v)
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(sub.buffer)
+    }
+
+    /// Writes a packed repeated `sint64` field. Empty arrays emit nothing.
+    + fn write_packed_sint64(field: u32, values: Array[i64]) {
+        if values.length == 0 : return
+        let sub = Writer.new(values.length * 2)
+        each values as v : sub.write_raw_sint64(v)
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(sub.buffer)
+    }
+
+    /// Writes a packed repeated `bool` field. Empty arrays emit nothing.
+    + fn write_packed_bool(field: u32, values: Array[bool]) {
+        if values.length == 0 : return
+        let sub = Writer.new(values.length)
+        each values as v : sub.write_raw_bool(v)
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(sub.buffer)
+    }
+
+    /// Writes a packed repeated `enum` field. Empty arrays emit nothing.
+    + fn write_packed_enum(field: u32, values: Array[i32]) {
+        if values.length == 0 : return
+        let sub = Writer.new(values.length * 2)
+        each values as v : sub.write_raw_enum(v)
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(sub.buffer)
+    }
+
+    /// Writes a packed repeated `fixed32` field. Empty arrays emit nothing.
+    + fn write_packed_fixed32(field: u32, values: Array[u32]) {
+        if values.length == 0 : return
+        let sub = Writer.new(values.length * 4)
+        each values as v : sub.write_raw_fixed32(v)
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(sub.buffer)
+    }
+
+    /// Writes a packed repeated `sfixed32` field. Empty arrays emit nothing.
+    + fn write_packed_sfixed32(field: u32, values: Array[i32]) {
+        if values.length == 0 : return
+        let sub = Writer.new(values.length * 4)
+        each values as v : sub.write_raw_sfixed32(v)
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(sub.buffer)
+    }
+
+    /// Writes a packed repeated `fixed64` field. Empty arrays emit nothing.
+    + fn write_packed_fixed64(field: u32, values: Array[u64]) {
+        if values.length == 0 : return
+        let sub = Writer.new(values.length * 8)
+        each values as v : sub.write_raw_fixed64(v)
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(sub.buffer)
+    }
+
+    /// Writes a packed repeated `sfixed64` field. Empty arrays emit nothing.
+    + fn write_packed_sfixed64(field: u32, values: Array[i64]) {
+        if values.length == 0 : return
+        let sub = Writer.new(values.length * 8)
+        each values as v : sub.write_raw_sfixed64(v)
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(sub.buffer)
+    }
+
+    /// Writes a packed repeated `float` field. Empty arrays emit nothing.
+    + fn write_packed_float(field: u32, values: Array[f32]) {
+        if values.length == 0 : return
+        let sub = Writer.new(values.length * 4)
+        each values as v : sub.write_raw_float(v)
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(sub.buffer)
+    }
+
+    /// Writes a packed repeated `double` field. Empty arrays emit nothing.
+    + fn write_packed_double(field: u32, values: Array[f64]) {
+        if values.length == 0 : return
+        let sub = Writer.new(values.length * 8)
+        each values as v : sub.write_raw_double(v)
+        this.write_tag(field, WireType.len)
+        this.write_raw_bytes(sub.buffer)
+    }
+}
