@@ -473,10 +473,7 @@
 
             if field.is_map {
                 if wt != WireType.len {
-                    throw .wire_type_mismatch {
-                        message: "Expected length-delimited wire type for map field '%{field.name}'"
-                        offset: r.pos
-                    }
+                    throw .wire_type_mismatch("Expected length-delimited wire type for map field '%{field.name}'", r.pos)
                 }
                 let entry_reader = r.read_submessage() !>
                 let k, v = this.decode_map_entry(field, entry_reader) !>
@@ -497,10 +494,7 @@
             if !is_scalar_type(field.type_name) && !this.is_enum_type(field.type_name) && wt == WireType.len {
                 let sub_desc = this.resolve_message(field.type_name)
                 if !isset(sub_desc) {
-                    throw .unknown_type {
-                        message: "Unknown message type '%{field.type_name}' for field '%{field.name}'"
-                        offset: r.pos
-                    }
+                    throw .unknown_type("Unknown message type '%{field.type_name}' for field '%{field.name}'", r.pos)
                 }
                 let sub_reader = r.read_submessage() !>
                 // Proto3 merge semantics for repeated occurrences of singular submessage
@@ -630,10 +624,7 @@
                     expect_wire_type(wt, WireType.varint, type_name, r.pos) !>
                     return DynamicValue.from_enum(r.read_enum() !>)
                 }
-                throw .unknown_type {
-                    message: "Unknown protobuf type '%{type_name}'"
-                    offset: r.pos
-                }
+                throw .unknown_type("Unknown protobuf type '%{type_name}'", r.pos)
             }
         }
     }
@@ -641,10 +632,7 @@
 
 fn expect_wire_type(actual: WireType, expected: WireType, type_name: String, offset: uint) !Error {
     if actual != expected {
-        throw .wire_type_mismatch {
-            message: "Wire type mismatch for '%{type_name}'"
-            offset: offset
-        }
+        throw .wire_type_mismatch("Wire type mismatch for '%{type_name}'", offset)
     }
 }
 

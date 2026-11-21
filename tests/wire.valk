@@ -338,7 +338,7 @@ test "Wire error handling: truncation, overflow, invalid tags, and depth limit" 
     let r1 = protobuf.Reader.new(trunc_v)
     let got_trunc = false
     r1.read_varint() ! {
-        assert(error_is(E.code, truncated))
+        assert(E is .truncated)
         got_trunc = true
     }
     assert(got_trunc)
@@ -350,7 +350,7 @@ test "Wire error handling: truncation, overflow, invalid tags, and depth limit" 
     let r2 = protobuf.Reader.new(over_v)
     let got_over = false
     r2.read_varint() ! {
-        assert(error_is(E.code, varint_overflow))
+        assert(E is .varint_overflow)
         got_over = true
     }
     assert(got_over)
@@ -361,7 +361,7 @@ test "Wire error handling: truncation, overflow, invalid tags, and depth limit" 
     let r3 = protobuf.Reader.new(bad_wt)
     let got_bad_wt = false
     r3.next_tag() ! {
-        assert(error_is(E.code, invalid_wire_type))
+        assert(E is .invalid_wire_type)
         got_bad_wt = true
     }
     assert(got_bad_wt)
@@ -372,7 +372,7 @@ test "Wire error handling: truncation, overflow, invalid tags, and depth limit" 
     let r4 = protobuf.Reader.new(zero_field)
     let got_zero = false
     r4.next_tag() ! {
-        assert(error_is(E.code, invalid_field_number))
+        assert(E is .invalid_field_number)
         got_zero = true
     }
     assert(got_zero)
@@ -387,7 +387,7 @@ test "Wire error handling: truncation, overflow, invalid tags, and depth limit" 
     let _ = r5.next_tag() ! { assert(false) return }
     let got_len_over = false
     r5.read_bytes() ! {
-        assert(error_is(E.code, length_overflow))
+        assert(E is .length_overflow)
         got_len_over = true
     }
     assert(got_len_over)
@@ -404,7 +404,7 @@ test "Wire error handling: truncation, overflow, invalid tags, and depth limit" 
     each 0 .. 6 {
         let _ = cur.next_tag() ! { assert(false) return }
         cur = cur.read_submessage() ! {
-            assert(error_is(E.code, depth_limit))
+            assert(E is .depth_limit)
             got_depth = true
             break
         }
@@ -511,7 +511,7 @@ test "Reader rejects truncated fixed fields and invalid wire types 4, 6, 7" {
         let r = protobuf.Reader.new(b)
         let caught = false
         r.next_tag() ! {
-            assert(error_is(E.code, invalid_wire_type))
+            assert(E is .invalid_wire_type)
             caught = true
         }
         assert(caught)
@@ -525,7 +525,7 @@ test "Reader rejects truncated fixed fields and invalid wire types 4, 6, 7" {
     let r32 = protobuf.Reader.new(short3)
     let c32 = false
     r32.read_fixed32() ! {
-        assert(error_is(E.code, truncated))
+        assert(E is .truncated)
         c32 = true
     }
     assert(c32)
@@ -534,7 +534,7 @@ test "Reader rejects truncated fixed fields and invalid wire types 4, 6, 7" {
     let r64 = protobuf.Reader.new(short3)
     let c64 = false
     r64.read_fixed64() ! {
-        assert(error_is(E.code, truncated))
+        assert(E is .truncated)
         c64 = true
     }
     assert(c64)
@@ -543,7 +543,7 @@ test "Reader rejects truncated fixed fields and invalid wire types 4, 6, 7" {
     let rs = protobuf.Reader.new(short3)
     let cs = false
     rs.skip_field(protobuf.WireType.fixed32) ! {
-        assert(error_is(E.code, truncated))
+        assert(E is .truncated)
         cs = true
     }
     assert(cs)

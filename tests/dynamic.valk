@@ -210,7 +210,7 @@ message Msg {
     w1.write_string(1, "not-an-int")
     let got_mismatch = false
     protobuf.DynamicMessage.decode(desc, w1.into_bytes(), file) ! {
-        assert(error_is(E.code, wire_type_mismatch))
+        assert(E is .wire_type_mismatch)
         got_mismatch = true
     }
     assert(got_mismatch)
@@ -220,7 +220,7 @@ message Msg {
     w2.write_message_bytes(2, "")
     let got_unknown = false
     protobuf.DynamicMessage.decode(desc, w2.into_bytes(), file) ! {
-        assert(error_is(E.code, unknown_type))
+        assert(E is .unknown_type)
         got_unknown = true
     }
     assert(got_unknown)

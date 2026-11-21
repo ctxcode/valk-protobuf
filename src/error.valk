@@ -3,30 +3,79 @@
 
 /// Thrown when encoding, decoding, or parsing Protocol Buffers data fails.
 ///
-/// - `truncated`: unexpected end of input while reading a wire value or payload.
-/// - `varint_overflow`: a varint exceeded 10 bytes or overflowed 64 bits.
-/// - `invalid_wire_type`: an unsupported or invalid wire type was encountered.
-/// - `invalid_field_number`: a field number was 0 or exceeded the maximum (536,870,911).
-/// - `wire_type_mismatch`: the wire type in the stream did not match the expected field type.
-/// - `depth_limit`: nested submessages exceeded `MAX_DEPTH`.
-/// - `length_overflow`: a length-delimited payload exceeded the available input or size bounds.
-/// - `syntax_error`: invalid `.proto` schema syntax.
-/// - `unknown_type`: a referenced message or enum descriptor could not be resolved.
-/// - `invalid_value`: a value was incompatible with the target field type.
-+ error Error (
-    truncated,
-    varint_overflow,
-    invalid_wire_type,
-    invalid_field_number,
-    wire_type_mismatch,
-    depth_limit,
-    length_overflow,
-    syntax_error,
-    unknown_type,
-    invalid_value
-) payload {
-    message: String
-    offset: uint (0)
-    line: uint (0)
-    column: uint (0)
+/// - `truncated(message, offset)`: unexpected end of input while reading a wire value or payload.
+/// - `varint_overflow(message, offset)`: a varint exceeded 10 bytes or overflowed 64 bits.
+/// - `invalid_wire_type(message, offset)`: an unsupported or invalid wire type was encountered.
+/// - `invalid_field_number(message, offset, line, column)`: a field number was 0 or exceeded the maximum (536,870,911).
+/// - `wire_type_mismatch(message, offset)`: the wire type in the stream did not match the expected field type.
+/// - `depth_limit(message, offset)`: nested submessages exceeded `MAX_DEPTH`.
+/// - `length_overflow(message, offset)`: a length-delimited payload exceeded the available input or size bounds.
+/// - `syntax_error(message, offset, line, column)`: invalid `.proto` schema syntax.
+/// - `unknown_type(message, offset)`: a referenced message or enum descriptor could not be resolved.
+/// - `invalid_value(message, offset)`: a value was incompatible with the target field type.
++ union Error {
+    truncated(String, uint)
+    varint_overflow(String, uint)
+    invalid_wire_type(String, uint)
+    invalid_field_number(String, uint, uint, uint)
+    wire_type_mismatch(String, uint)
+    depth_limit(String, uint)
+    length_overflow(String, uint)
+    syntax_error(String, uint, uint, uint)
+    unknown_type(String, uint)
+    invalid_value(String, uint)
+
+    /// Returns the error description carried by any variant.
+    + get message: String {
+        return match this : String {
+            .truncated(msg, _) => msg
+            .varint_overflow(msg, _) => msg
+            .invalid_wire_type(msg, _) => msg
+            .invalid_field_number(msg, _, _, _) => msg
+            .wire_type_mismatch(msg, _) => msg
+            .depth_limit(msg, _) => msg
+            .length_overflow(msg, _) => msg
+            .syntax_error(msg, _, _, _) => msg
+            .unknown_type(msg, _) => msg
+            .invalid_value(msg, _) => msg
+        }
+    }
+
+    /// Returns the byte offset associated with the error, or `0` if unavailable.
+    + get offset: uint {
+        return match this : uint {
+            .truncated(_, off) => off
+            .varint_overflow(_, off) => off
+            .invalid_wire_type(_, off) => off
+            .invalid_field_number(_, off, _, _) => off
+            .wire_type_mismatch(_, off) => off
+            .depth_limit(_, off) => off
+            .length_overflow(_, off) => off
+            .syntax_error(_, off, _, _) => off
+            .unknown_type(_, off) => off
+            .invalid_value(_, off) => off
+        }
+    }
+
+    /// Returns the 1-based line number for `.proto` parse errors, or `0` for wire errors.
+    + get line: uint {
+        return match this : uint {
+            .invalid_field_number(_, _, line, _) => line
+            .syntax_error(_, _, line, _) => line
+            default => 0
+        }
+    }
+
+    /// Returns the 1-based column number for `.proto` parse errors, or `0` for wire errors.
+    + get column: uint {
+        return match this : uint {
+            .invalid_field_number(_, _, _, col) => col
+            .syntax_error(_, _, _, col) => col
+            default => 0
+        }
+    }
+
+    + fn to_string() String $auto {
+        return this.message
+    }
 }

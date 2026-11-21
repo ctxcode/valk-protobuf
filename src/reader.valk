@@ -46,19 +46,13 @@
         let start = this.pos
         let raw = this.read_varint() !>
         if raw > 0xffffffff {
-            throw .invalid_field_number {
-                message: "Tag varint exceeds 32-bit range"
-                offset: start
-            }
+            throw .invalid_field_number("Tag varint exceeds 32-bit range", start, 0, 0)
         }
         let tag = raw.to(u32)
         let field_num = tag >> 3
         let wt_raw = (tag & 0x7).to(u8)
         if field_num == 0 || field_num > MAX_FIELD_NUMBER {
-            throw .invalid_field_number {
-                message: "Invalid protobuf field number: %{field_num}"
-                offset: start
-            }
+            throw .invalid_field_number("Invalid protobuf field number: %{field_num}", start, 0, 0)
         }
         let wt = wire_type_from_u8(wt_raw, start) !>
         return (field_num, wt)
@@ -74,31 +68,19 @@
         let count: uint = 0
         while count < 10 {
             if this.pos >= this.source.length {
-                throw .truncated {
-                    message: "Unexpected end of input while reading varint"
-                    offset: this.pos
-                }
+                throw .truncated("Unexpected end of input while reading varint", this.pos)
             }
-            let b = this.source.get(this.pos) ! throw .truncated {
-                message: "Unexpected end of input while reading varint"
-                offset: this.pos
-            }
+            let b = this.source.get(this.pos) ! throw .truncated("Unexpected end of input while reading varint", this.pos)
             this.pos += 1
             if count == 9 && b > 1 {
-                throw .varint_overflow {
-                    message: "Varint overflows 64 bits"
-                    offset: start
-                }
+                throw .varint_overflow("Varint overflows 64 bits", start)
             }
             result = result | ((b & 0x7f).to(u64) << shift)
             if (b & 0x80) == 0 : return result
             shift += 7
             count += 1
         }
-        throw .varint_overflow {
-            message: "Varint exceeds maximum 10-byte encoding"
-            offset: start
-        }
+        throw .varint_overflow("Varint exceeds maximum 10-byte encoding", start)
     }
 
     /// Reads a protobuf `int32` varint.
@@ -151,16 +133,13 @@
     /// Reads a 32-bit little-endian `fixed32` integer.
     + fn read_fixed32() u32 !Error {
         if this.remaining < 4 {
-            throw .truncated {
-                message: "Unexpected end of input while reading fixed32"
-                offset: this.pos
-            }
+            throw .truncated("Unexpected end of input while reading fixed32", this.pos)
         }
         let p = this.pos
-        let b0 = (this.source.get(p) ! throw .truncated { message: "Unexpected EOF", offset: p }).to(u32)
-        let b1 = (this.source.get(p + 1) ! throw .truncated { message: "Unexpected EOF", offset: p }).to(u32)
-        let b2 = (this.source.get(p + 2) ! throw .truncated { message: "Unexpected EOF", offset: p }).to(u32)
-        let b3 = (this.source.get(p + 3) ! throw .truncated { message: "Unexpected EOF", offset: p }).to(u32)
+        let b0 = (this.source.get(p) ! throw .truncated("Unexpected EOF", p)).to(u32)
+        let b1 = (this.source.get(p + 1) ! throw .truncated("Unexpected EOF", p)).to(u32)
+        let b2 = (this.source.get(p + 2) ! throw .truncated("Unexpected EOF", p)).to(u32)
+        let b3 = (this.source.get(p + 3) ! throw .truncated("Unexpected EOF", p)).to(u32)
         this.pos += 4
         return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
     }
@@ -174,10 +153,7 @@
     /// Reads a 64-bit little-endian `fixed64` integer.
     + fn read_fixed64() u64 !Error {
         if this.remaining < 8 {
-            throw .truncated {
-                message: "Unexpected end of input while reading fixed64"
-                offset: this.pos
-            }
+            throw .truncated("Unexpected end of input while reading fixed64", this.pos)
         }
         let lo = (this.read_fixed32() !>).to(u64)
         let hi = (this.read_fixed32() !>).to(u64)
@@ -207,10 +183,7 @@
         let start = this.pos
         let len_u64 = this.read_varint() !>
         if len_u64 > this.remaining.to(u64) {
-            throw .length_overflow {
-                message: "Length-delimited field length %{len_u64} exceeds remaining %{this.remaining} bytes"
-                offset: start
-            }
+            throw .length_overflow("Length-delimited field length %{len_u64} exceeds remaining %{this.remaining} bytes", start)
         }
         let len = len_u64.to(uint)
         let view = this.source.view(this.pos, len)
@@ -228,18 +201,12 @@
     /// Throws `.depth_limit` when nesting depth exceeds `max_depth`.
     + fn read_submessage() Reader !Error {
         if this.depth >= this.max_depth {
-            throw .depth_limit {
-                message: "Message nesting depth exceeded limit of %{this.max_depth}"
-                offset: this.pos
-            }
+            throw .depth_limit("Message nesting depth exceeded limit of %{this.max_depth}", this.pos)
         }
         let start = this.pos
         let len_u64 = this.read_varint() !>
         if len_u64 > this.remaining.to(u64) {
-            throw .length_overflow {
-                message: "Submessage length %{len_u64} exceeds remaining %{this.remaining} bytes"
-                offset: start
-            }
+            throw .length_overflow("Submessage length %{len_u64} exceeds remaining %{this.remaining} bytes", start)
         }
         let len = len_u64.to(uint)
         let view = this.source.view(this.pos, len)
@@ -260,10 +227,7 @@
             }
             WireType.fixed64 => {
                 if this.remaining < 8 {
-                    throw .truncated {
-                        message: "Unexpected end of input while skipping fixed64 field"
-                        offset: this.pos
-                    }
+                    throw .truncated("Unexpected end of input while skipping fixed64 field", this.pos)
                 }
                 this.pos += 8
             }
@@ -271,19 +235,13 @@
                 let start = this.pos
                 let len_u64 = this.read_varint() !>
                 if len_u64 > this.remaining.to(u64) {
-                    throw .length_overflow {
-                        message: "Skipped length-delimited field length %{len_u64} exceeds remaining %{this.remaining} bytes"
-                        offset: start
-                    }
+                    throw .length_overflow("Skipped length-delimited field length %{len_u64} exceeds remaining %{this.remaining} bytes", start)
                 }
                 this.pos += len_u64.to(uint)
             }
             WireType.fixed32 => {
                 if this.remaining < 4 {
-                    throw .truncated {
-                        message: "Unexpected end of input while skipping fixed32 field"
-                        offset: this.pos
-                    }
+                    throw .truncated("Unexpected end of input while skipping fixed32 field", this.pos)
                 }
                 this.pos += 4
             }
@@ -478,10 +436,7 @@
         let start = this.pos
         let len_u64 = this.read_varint() !>
         if len_u64 > this.remaining.to(u64) {
-            throw .length_overflow {
-                message: "Packed field length %{len_u64} exceeds remaining %{this.remaining} bytes"
-                offset: start
-            }
+            throw .length_overflow("Packed field length %{len_u64} exceeds remaining %{this.remaining} bytes", start)
         }
         let len = len_u64.to(uint)
         let view = this.source.view(this.pos, len)

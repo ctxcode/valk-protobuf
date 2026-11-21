@@ -127,12 +127,7 @@ class ProtoLexer {
                     if c != '\r' : buf.write_byte(c)
                 }
                 if !closed {
-                    throw .syntax_error {
-                        message: "Unterminated block comment"
-                        offset: start_off
-                        line: start_line
-                        column: start_col
-                    }
+                    throw .syntax_error("Unterminated block comment", start_off, start_line, start_col)
                 }
                 if start_line != this.last_tok_end_line {
                     let raw = buf.to_string()
@@ -209,12 +204,7 @@ class ProtoLexer {
             return this.read_number(start_off, start_line, start_col, doc) !>
         }
 
-        throw .syntax_error {
-            message: "Unexpected character in .proto input"
-            offset: start_off
-            line: start_line
-            column: start_col
-        }
+        throw .syntax_error("Unexpected character in .proto input", start_off, start_line, start_col)
     }
 
     fn make_tok(kind: TokenKind, text: String, off: uint, line: uint, col: uint, doc: String) Token {
@@ -238,21 +228,11 @@ class ProtoLexer {
                 return buf.to_string()
             }
             if c == '\n' || c == '\r' {
-                throw .syntax_error {
-                    message: "Unterminated string literal"
-                    offset: start_off
-                    line: start_line
-                    column: start_col
-                }
+                throw .syntax_error("Unterminated string literal", start_off, start_line, start_col)
             }
             if c == '\\' {
                 if this.is_eof() {
-                    throw .syntax_error {
-                        message: "Unterminated escape sequence in string literal"
-                        offset: this.pos
-                        line: this.line
-                        column: this.column
-                    }
+                    throw .syntax_error("Unterminated escape sequence in string literal", this.pos, this.line, this.column)
                 }
                 let esc = this.advance()
                 match esc {
@@ -270,12 +250,7 @@ class ProtoLexer {
                         let d1 = hex_val(this.advance())
                         let d2 = hex_val(this.advance())
                         if d1 < 0 || d2 < 0 {
-                            throw .syntax_error {
-                                message: "Invalid hex escape sequence"
-                                offset: this.pos
-                                line: this.line
-                                column: this.column
-                            }
+                            throw .syntax_error("Invalid hex escape sequence", this.pos, this.line, this.column)
                         }
                         buf.write_byte(((d1 << 4) | d2).to(u8))
                     }
@@ -303,12 +278,7 @@ class ProtoLexer {
                 buf.write_byte(c)
             }
         }
-        throw .syntax_error {
-            message: "Unterminated string literal"
-            offset: start_off
-            line: start_line
-            column: start_col
-        }
+        throw .syntax_error("Unterminated string literal", start_off, start_line, start_col)
     }
 
     fn read_number(start_off: uint, start_line: uint, start_col: uint, doc: String) Token !Error {
@@ -325,12 +295,7 @@ class ProtoLexer {
                 digits += 1
             }
             if digits == 0 {
-                throw .syntax_error {
-                    message: "Invalid hexadecimal integer literal"
-                    offset: start_off
-                    line: start_line
-                    column: start_col
-                }
+                throw .syntax_error("Invalid hexadecimal integer literal", start_off, start_line, start_col)
             }
             return this.make_tok(TokenKind.int_lit, buf.to_string(), start_off, start_line, start_col, doc)
         }
@@ -357,12 +322,7 @@ class ProtoLexer {
                 exp_digits += 1
             }
             if exp_digits == 0 {
-                throw .syntax_error {
-                    message: "Invalid floating-point exponent"
-                    offset: start_off
-                    line: start_line
-                    column: start_col
-                }
+                throw .syntax_error("Invalid floating-point exponent", start_off, start_line, start_col)
             }
         }
         let kind = is_float ? TokenKind.float_lit : TokenKind.int_lit
@@ -437,12 +397,7 @@ class ProtoParser {
     fn expect(kind: TokenKind, expected: String) Token !Error {
         let t = this.cur()
         if t.kind != kind {
-            throw .syntax_error {
-                message: "Expected %{expected}, got '%{t.text}'"
-                offset: t.offset
-                line: t.line
-                column: t.column
-            }
+            throw .syntax_error("Expected %{expected}, got '%{t.text}'", t.offset, t.line, t.column)
         }
         return this.next()
     }
@@ -454,12 +409,7 @@ class ProtoParser {
     fn expect_keyword(kw: String) Token !Error {
         let t = this.cur()
         if t.kind != TokenKind.ident || t.text != kw {
-            throw .syntax_error {
-                message: "Expected '%{kw}', got '%{t.text}'"
-                offset: t.offset
-                line: t.line
-                column: t.column
-            }
+            throw .syntax_error("Expected '%{kw}', got '%{t.text}'", t.offset, t.line, t.column)
         }
         return this.next()
     }
@@ -537,12 +487,7 @@ class ProtoParser {
                 this.next()
                 return sign + val.text
             }
-            throw .syntax_error {
-                message: "Expected number or identifier after '%{sign}'"
-                offset: val.offset
-                line: val.line
-                column: val.column
-            }
+            throw .syntax_error("Expected number or identifier after '%{sign}'", val.offset, val.line, val.column)
         }
         if t.kind == TokenKind.int_lit || t.kind == TokenKind.float_lit {
             this.next()
@@ -551,12 +496,7 @@ class ProtoParser {
         if t.kind == TokenKind.ident {
             return this.parse_qualified_name() !>
         }
-        throw .syntax_error {
-            message: "Expected option value, got '%{t.text}'"
-            offset: t.offset
-            line: t.line
-            column: t.column
-        }
+        throw .syntax_error("Expected option value, got '%{t.text}'", t.offset, t.line, t.column)
     }
 
     fn parse_aggregate_option_value() String !Error {
@@ -568,12 +508,7 @@ class ProtoParser {
         while depth > 0 {
             let t = this.cur()
             if t.kind == TokenKind.eof {
-                throw .syntax_error {
-                    message: "Unterminated aggregate option value"
-                    offset: open.offset
-                    line: open.line
-                    column: open.column
-                }
+                throw .syntax_error("Unterminated aggregate option value", open.offset, open.line, open.column)
             }
             this.next()
             if t.kind == TokenKind.lbrace {
@@ -642,12 +577,7 @@ class ProtoParser {
         let tok = this.expect(TokenKind.int_lit, "integer literal") !>
         let v = parse_proto_int(tok.text, negative, tok.offset, tok.line, tok.column) !>
         if v < -2147483648 || v > 2147483647 {
-            throw .syntax_error {
-                message: "Integer literal out of 32-bit signed range: %{tok.text}"
-                offset: tok.offset
-                line: tok.line
-                column: tok.column
-            }
+            throw .syntax_error("Integer literal out of 32-bit signed range: %{tok.text}", tok.offset, tok.line, tok.column)
         }
         return v.to(i32)
     }
@@ -656,12 +586,7 @@ class ProtoParser {
         let tok = this.expect(TokenKind.int_lit, "field number") !>
         let v = parse_proto_int(tok.text, false, tok.offset, tok.line, tok.column) !>
         if v <= 0 || v > MAX_FIELD_NUMBER.to(i64) {
-            throw .invalid_field_number {
-                message: "Field number %{v} out of valid range (1..%{MAX_FIELD_NUMBER})"
-                offset: tok.offset
-                line: tok.line
-                column: tok.column
-            }
+            throw .invalid_field_number("Field number %{v} out of valid range (1..%{MAX_FIELD_NUMBER})", tok.offset, tok.line, tok.column)
         }
         return v.to(u32)
     }
@@ -794,12 +719,7 @@ class ProtoParser {
         this.expect(TokenKind.langle, "'<'") !>
         let key_tok = this.expect_ident("map key type") !>
         if !is_valid_map_key_type(key_tok.text) {
-            throw .syntax_error {
-                message: "Invalid map key type '%{key_tok.text}'"
-                offset: key_tok.offset
-                line: key_tok.line
-                column: key_tok.column
-            }
+            throw .syntax_error("Invalid map key type '%{key_tok.text}'", key_tok.offset, key_tok.line, key_tok.column)
         }
         this.expect(TokenKind.comma, "','") !>
         let val_type = this.parse_qualified_name() !>
@@ -974,12 +894,7 @@ class ProtoParser {
                 continue
             }
             let bad = this.cur()
-            throw .syntax_error {
-                message: "Unexpected token '%{bad.text}' inside service '%{svc.name}'"
-                offset: bad.offset
-                line: bad.line
-                column: bad.column
-            }
+            throw .syntax_error("Unexpected token '%{bad.text}' inside service '%{svc.name}'", bad.offset, bad.line, bad.column)
         }
 
         this.expect(TokenKind.rbrace, "'}'") !>
@@ -997,12 +912,7 @@ class ProtoParser {
             }
             let t = this.cur()
             if t.kind != TokenKind.ident {
-                throw .syntax_error {
-                    message: "Unexpected top-level token '%{t.text}'"
-                    offset: t.offset
-                    line: t.line
-                    column: t.column
-                }
+                throw .syntax_error("Unexpected top-level token '%{t.text}'", t.offset, t.line, t.column)
             }
 
             if t.text == "syntax" {
@@ -1077,12 +987,7 @@ class ProtoParser {
                 continue
             }
 
-            throw .syntax_error {
-                message: "Unexpected top-level declaration '%{t.text}'"
-                offset: t.offset
-                line: t.line
-                column: t.column
-            }
+            throw .syntax_error("Unexpected top-level declaration '%{t.text}'", t.offset, t.line, t.column)
         }
 
         return file
@@ -1151,12 +1056,7 @@ fn parse_proto_int(text: String, negative: bool, offset: uint, line: uint, colum
         let ch = text.get(i)
         let d = hex_val(ch)
         if d < 0 || d.to(u64) >= base {
-            throw .syntax_error {
-                message: "Invalid integer literal '%{text}'"
-                offset: offset
-                line: line
-                column: column
-            }
+            throw .syntax_error("Invalid integer literal '%{text}'", offset, line, column)
         }
         acc = acc * base + d.to(u64)
         i += 1

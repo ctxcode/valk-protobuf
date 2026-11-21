@@ -186,7 +186,7 @@ test "Parser reports syntax errors with line and column" {
     // Invalid map key type (float not allowed in protobuf)
     let err1 = false
     protobuf.parse_proto("syntax = \"proto3\";\nmessage Bad {\n  map<float, string> m = 1;\n}") ! {
-        assert(error_is(E.code, syntax_error))
+        assert(E is .syntax_error)
         assert(E.line == 3)
         err1 = true
     }
@@ -195,7 +195,7 @@ test "Parser reports syntax errors with line and column" {
     // Field number 0
     let err2 = false
     protobuf.parse_proto("syntax = \"proto3\";\nmessage Bad {\n  int32 x = 0;\n}") ! {
-        assert(error_is(E.code, invalid_field_number))
+        assert(E is .invalid_field_number)
         assert(E.line == 3)
         err2 = true
     }
@@ -204,7 +204,7 @@ test "Parser reports syntax errors with line and column" {
     // Unterminated block comment
     let err3 = false
     protobuf.parse_proto("/* unclosed comment") ! {
-        assert(error_is(E.code, syntax_error))
+        assert(E is .syntax_error)
         err3 = true
     }
     assert(err3)

@@ -34,10 +34,7 @@
         2 => return WireType.len
         5 => return WireType.fixed32
         default => {
-            throw .invalid_wire_type {
-                message: "Invalid protobuf wire type: %{v}"
-                offset: offset
-            }
+            throw .invalid_wire_type("Invalid protobuf wire type: %{v}", offset)
         }
     }
 }

@@ -16,13 +16,6 @@ Namespaces: [main](#main)
 + value MAX_FIELD_NUMBER (536870911)
 ```
 
-## Errors for 'main'
-
-```js
-// Thrown when encoding, decoding, or parsing Protocol Buffers data fails.
-+ error Error (truncated, varint_overflow, invalid_wire_type, invalid_field_number, wire_type_mismatch, depth_limit, length_overflow, syntax_error, unknown_type, invalid_value) payload { message: String, offset: uint (0), line: uint (0), column: uint (0) }
-```
-
 ## Enums for 'main'
 
 ```js
@@ -264,6 +257,32 @@ Namespaces: [main](#main)
     + number: i32
     // Inline value options (e.g., `[deprecated = true]`).
     + options: Array[ProtoOption]
+}
+```
+
+```js
+// Thrown when encoding, decoding, or parsing Protocol Buffers data fails.
++ union Error {
+    truncated(String, uint)
+    varint_overflow(String, uint)
+    invalid_wire_type(String, uint)
+    invalid_field_number(String, uint, uint, uint)
+    wire_type_mismatch(String, uint)
+    depth_limit(String, uint)
+    length_overflow(String, uint)
+    syntax_error(String, uint, uint, uint)
+    unknown_type(String, uint)
+    invalid_value(String, uint)
+
+    // Returns the 1-based column number for `.proto` parse errors, or `0` for wire errors.
+    + get column: uint
+    // Returns the 1-based line number for `.proto` parse errors, or `0` for wire errors.
+    + get line: uint
+    // Returns the error description carried by any variant.
+    + get message: String
+    // Returns the byte offset associated with the error, or `0` if unavailable.
+    + get offset: uint
+    + fn to_string() String
 }
 ```
 

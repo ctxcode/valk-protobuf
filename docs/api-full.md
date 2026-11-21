@@ -24,28 +24,6 @@ Maximum nested submessage depth allowed when decoding.
 
 Maximum valid protobuf field number (`2^29 - 1`).
 
-## Errors for 'main'
-
-```js
-// Thrown when encoding, decoding, or parsing Protocol Buffers data fails.
-+ error Error (truncated, varint_overflow, invalid_wire_type, invalid_field_number, wire_type_mismatch, depth_limit, length_overflow, syntax_error, unknown_type, invalid_value) payload { message: String, offset: uint (0), line: uint (0), column: uint (0) }
-```
-
-### Error
-
-Thrown when encoding, decoding, or parsing Protocol Buffers data fails.
-
-- `truncated`: unexpected end of input while reading a wire value or payload.
-- `varint_overflow`: a varint exceeded 10 bytes or overflowed 64 bits.
-- `invalid_wire_type`: an unsupported or invalid wire type was encountered.
-- `invalid_field_number`: a field number was 0 or exceeded the maximum (536,870,911).
-- `wire_type_mismatch`: the wire type in the stream did not match the expected field type.
-- `depth_limit`: nested submessages exceeded `MAX_DEPTH`.
-- `length_overflow`: a length-delimited payload exceeded the available input or size bounds.
-- `syntax_error`: invalid `.proto` schema syntax.
-- `unknown_type`: a referenced message or enum descriptor could not be resolved.
-- `invalid_value`: a value was incompatible with the target field type.
-
 ## Enums for 'main'
 
 ```js
@@ -682,6 +660,63 @@ Signed 32-bit wire number.
 #### options
 
 Inline value options (e.g., `[deprecated = true]`).
+
+```js
+// Thrown when encoding, decoding, or parsing Protocol Buffers data fails.
++ union Error {
+    truncated(String, uint)
+    varint_overflow(String, uint)
+    invalid_wire_type(String, uint)
+    invalid_field_number(String, uint, uint, uint)
+    wire_type_mismatch(String, uint)
+    depth_limit(String, uint)
+    length_overflow(String, uint)
+    syntax_error(String, uint, uint, uint)
+    unknown_type(String, uint)
+    invalid_value(String, uint)
+
+    // Returns the 1-based column number for `.proto` parse errors, or `0` for wire errors.
+    + get column: uint
+    // Returns the 1-based line number for `.proto` parse errors, or `0` for wire errors.
+    + get line: uint
+    // Returns the error description carried by any variant.
+    + get message: String
+    // Returns the byte offset associated with the error, or `0` if unavailable.
+    + get offset: uint
+    + fn to_string() String
+}
+```
+
+### Error
+
+Thrown when encoding, decoding, or parsing Protocol Buffers data fails.
+
+- `truncated(message, offset)`: unexpected end of input while reading a wire value or payload.
+- `varint_overflow(message, offset)`: a varint exceeded 10 bytes or overflowed 64 bits.
+- `invalid_wire_type(message, offset)`: an unsupported or invalid wire type was encountered.
+- `invalid_field_number(message, offset, line, column)`: a field number was 0 or exceeded the maximum (536,870,911).
+- `wire_type_mismatch(message, offset)`: the wire type in the stream did not match the expected field type.
+- `depth_limit(message, offset)`: nested submessages exceeded `MAX_DEPTH`.
+- `length_overflow(message, offset)`: a length-delimited payload exceeded the available input or size bounds.
+- `syntax_error(message, offset, line, column)`: invalid `.proto` schema syntax.
+- `unknown_type(message, offset)`: a referenced message or enum descriptor could not be resolved.
+- `invalid_value(message, offset)`: a value was incompatible with the target field type.
+
+#### column
+
+Returns the 1-based column number for `.proto` parse errors, or `0` for wire errors.
+
+#### line
+
+Returns the 1-based line number for `.proto` parse errors, or `0` for wire errors.
+
+#### message
+
+Returns the error description carried by any variant.
+
+#### offset
+
+Returns the byte offset associated with the error, or `0` if unavailable.
 
 ```js
 // A parsed field inside a `.proto` `message` or `oneof`.

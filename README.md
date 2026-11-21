@@ -4,7 +4,7 @@ Pure-[Valk](https://valk-lang.dev) Protocol Buffers (proto3): wire-format codec,
 parser, schema-driven dynamic messages, and a Valk code generator (`valk-protoc`). No C/C++ or
 `protoc` dependencies.
 
-Requires Valk 0.8.10 or newer.
+Requires Valk 0.9.1 or newer.
 
 ## Install
 
