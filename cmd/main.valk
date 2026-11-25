@@ -2,14 +2,16 @@ use valk.fs
 use protobuf
 
 fn print_usage() {
-    println("Usage: valk-protoc <schema.proto> [-o <output.valk>] [--import <module>] [--private] [--no-header]")
+    println("Usage: valk-protoc <schema.proto> [-o <output.valk>] [--grpc] [--import <module>] [--grpc-import <module>] [--private] [--no-header]")
     println("")
     println("Options:")
-    println("  -o, --out <file>      Write generated Valk source to <file> (default: stdout)")
-    println("  --import <name>       Module name for `use <name>` (default: protobuf)")
-    println("  --private             Omit `+` public modifiers on generated types")
-    println("  --no-header           Omit the generated-file header comment")
-    println("  -h, --help            Show this help message")
+    println("  -o, --out <file>       Write generated Valk source to <file> (default: stdout)")
+    println("  --grpc                 Emit gRPC client/server stubs for service blocks (valk-grpc)")
+    println("  --import <name>        Module name for `use <name>` (default: protobuf)")
+    println("  --grpc-import <name>   Module name for gRPC runtime import (default: grpc)")
+    println("  --private              Omit `+` public modifiers on generated types")
+    println("  --no-header            Omit the generated-file header comment")
+    println("  -h, --help             Show this help message")
 }
 
 fn main(args: Array[String]) i32 {
@@ -41,6 +43,21 @@ fn main(args: Array[String]) i32 {
                 return 1
             }
             opts.protobuf_import = args.get(i) !? "protobuf"
+            i += 1
+            continue
+        }
+        if arg == "--grpc" {
+            opts.emit_grpc = true
+            i += 1
+            continue
+        }
+        if arg == "--grpc-import" {
+            i += 1
+            if i >= args.length {
+                println("Error: missing module name after --grpc-import")
+                return 1
+            }
+            opts.grpc_import = args.get(i) !? "grpc"
             i += 1
             continue
         }

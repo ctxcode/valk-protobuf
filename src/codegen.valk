@@ -6,6 +6,10 @@
     + public_types: bool (true)
     /// Emit the standard generated-file header comment at the top of output.
     + emit_header: bool (true)
+    /// Emit gRPC service interfaces, registration helpers, and client stubs for `service` blocks.
+    + emit_grpc: bool (false)
+    /// Module name imported for the gRPC runtime (`use <grpc_import>`).
+    + grpc_import: String ("grpc")
 }
 
 /// Generates idiomatic Valk 0.8.10 source code from a parsed `FileDescriptor`.
@@ -256,10 +260,11 @@ class ValkCodegen {
             this.line()
         }
 
-        if this.file.messages.length > 0 {
-            this.line("use %{this.pb()}")
-            this.line()
-        }
+        let has_pb = this.file.messages.length > 0
+        let has_grpc = this.opts.emit_grpc && this.file.services.length > 0
+        if has_pb : this.line("use %{this.pb()}")
+        if has_grpc : this.line("use %{this.opts.grpc_import}")
+        if has_pb || has_grpc : this.line()
 
         let scope = Array[String]{}
         each this.file.enums as e {
@@ -267,6 +272,11 @@ class ValkCodegen {
         }
         each this.file.messages as m {
             this.emit_message_tree(m, scope, "")
+        }
+        if has_grpc {
+            each this.file.services as svc {
+                this.emit_service(svc)
+            }
         }
 
         return this.buf.to_string()
@@ -670,6 +680,137 @@ class ValkCodegen {
         }
         this.line("                }")
     }
+
+    fn emit_service(svc: ServiceDescriptor) {
+        let pub_p = this.pub_prefix()
+        let g = this.opts.grpc_import
+        let full_svc = this.file.package_name.bytes > 0 ? "%{this.file.package_name}.%{svc.name}" : svc.name
+        let empty_scope = Array[String]{}
+
+        // Server interface
+        this.emit_doc(svc.doc, "")
+        this.line("/// Server interface for the `%{full_svc}` gRPC service.")
+        this.line("%{pub_p}interface %{svc.name}Service {")
+        each svc.methods as rpc {
+            this.emit_doc(rpc.doc, "    ")
+            let in_t, _ = this.resolve_proto_type(rpc.input_type, empty_scope)
+            let out_t, _ = this.resolve_proto_type(rpc.output_type, empty_scope)
+            let mname = escape_valk_ident(camel_to_snake(rpc.name))
+            if !rpc.client_streaming && !rpc.server_streaming {
+                this.line("    %{pub_p}fn %{mname}(ctx: %{g}.CallContext, req: %{in_t}) %{out_t} !%{g}.GrpcError;")
+            } else if !rpc.client_streaming && rpc.server_streaming {
+                this.line("    %{pub_p}fn %{mname}(ctx: %{g}.CallContext, req: %{in_t}, stream: %{g}.TypedServerStream[%{in_t}, %{out_t}]) void !%{g}.GrpcError;")
+            } else if rpc.client_streaming && !rpc.server_streaming {
+                this.line("    %{pub_p}fn %{mname}(stream: %{g}.TypedServerStream[%{in_t}, %{out_t}]) %{out_t} !%{g}.GrpcError;")
+            } else {
+                this.line("    %{pub_p}fn %{mname}(stream: %{g}.TypedServerStream[%{in_t}, %{out_t}]) void !%{g}.GrpcError;")
+            }
+        }
+        this.line("}")
+        this.line()
+
+        // Server registration helper
+        this.line("/// Registers all RPC methods of `%{full_svc}` on `server`.")
+        this.line("%{pub_p}fn register_%{svc.name}_service(server: %{g}.GrpcServer, service: %{svc.name}Service) {")
+        if svc.methods.length == 0 {
+            this.line("    let _ = server")
+            this.line("    let _ = service")
+        }
+        each svc.methods as rpc {
+            let in_t, _ = this.resolve_proto_type(rpc.input_type, empty_scope)
+            let out_t, _ = this.resolve_proto_type(rpc.output_type, empty_scope)
+            let mname = escape_valk_ident(camel_to_snake(rpc.name))
+            let path = "/%{full_svc}/%{rpc.name}"
+            if !rpc.client_streaming && !rpc.server_streaming {
+                this.line("    server.register_unary(\"%{path}\", fn(ctx: %{g}.CallContext, raw: String) String !%{g}.GrpcError {")
+                this.line("        let req = %{in_t}.decode_proto(raw) ! throw %{g}.err(.invalid_argument, E.message)")
+                this.line("        let res = service.%{mname}(ctx, req) !>")
+                this.line("        return res.to_proto_bytes()")
+                this.line("    })")
+            } else if !rpc.client_streaming && rpc.server_streaming {
+                this.line("    server.register_server_stream(\"%{path}\", fn(ctx: %{g}.CallContext, raw: String, raw_stream: %{g}.ServerStream) void !%{g}.GrpcError {")
+                this.line("        let req = %{in_t}.decode_proto(raw) ! throw %{g}.err(.invalid_argument, E.message)")
+                this.line("        let stream = %{g}.TypedServerStream[%{in_t}, %{out_t}].new(raw_stream)")
+                this.line("        service.%{mname}(ctx, req, stream) !>")
+                this.line("    })")
+            } else if rpc.client_streaming && !rpc.server_streaming {
+                this.line("    server.register_client_stream(\"%{path}\", fn(raw_stream: %{g}.ServerStream) String !%{g}.GrpcError {")
+                this.line("        let stream = %{g}.TypedServerStream[%{in_t}, %{out_t}].new(raw_stream)")
+                this.line("        let res = service.%{mname}(stream) !>")
+                this.line("        return res.to_proto_bytes()")
+                this.line("    })")
+            } else {
+                this.line("    server.register_bidi_stream(\"%{path}\", fn(raw_stream: %{g}.ServerStream) void !%{g}.GrpcError {")
+                this.line("        let stream = %{g}.TypedServerStream[%{in_t}, %{out_t}].new(raw_stream)")
+                this.line("        service.%{mname}(stream) !>")
+                this.line("    })")
+            }
+        }
+        this.line("}")
+        this.line()
+
+        // Client stub class
+        this.emit_doc(svc.doc, "")
+        this.line("/// Client stub for the `%{full_svc}` gRPC service.")
+        this.line("%{pub_p}class %{svc.name}Client {")
+        this.line("    %{pub_p}client: %{g}.GrpcClient")
+        this.line()
+        this.line("    %{pub_p}static fn new(client: %{g}.GrpcClient) SELF {")
+        this.line("        return SELF { client: client }")
+        this.line("    }")
+        each svc.methods as rpc {
+            this.line()
+            this.emit_doc(rpc.doc, "    ")
+            let in_t, _ = this.resolve_proto_type(rpc.input_type, empty_scope)
+            let out_t, _ = this.resolve_proto_type(rpc.output_type, empty_scope)
+            let mname = escape_valk_ident(camel_to_snake(rpc.name))
+            let path = "/%{full_svc}/%{rpc.name}"
+            if !rpc.client_streaming && !rpc.server_streaming {
+                this.line("    %{pub_p}fn %{mname}(req: %{in_t}, options: ?%{g}.CallOptions (null)) %{out_t} !%{g}.GrpcError {")
+                this.line("        let resp = this.client.unary(\"%{path}\", req.to_proto_bytes(), options) !>")
+                this.line("        return %{out_t}.decode_proto(resp.body) ! throw %{g}.err(.internal, E.message)")
+                this.line("    }")
+            } else if !rpc.client_streaming && rpc.server_streaming {
+                this.line("    %{pub_p}fn %{mname}(req: %{in_t}, options: ?%{g}.CallOptions (null)) %{g}.TypedClientStream[%{in_t}, %{out_t}] !%{g}.GrpcError {")
+                this.line("        let raw = this.client.server_stream(\"%{path}\", req.to_proto_bytes(), options) !>")
+                this.line("        return %{g}.TypedClientStream[%{in_t}, %{out_t}].new(raw)")
+                this.line("    }")
+            } else if rpc.client_streaming && !rpc.server_streaming {
+                this.line("    %{pub_p}fn %{mname}(options: ?%{g}.CallOptions (null)) %{g}.TypedClientStream[%{in_t}, %{out_t}] !%{g}.GrpcError {")
+                this.line("        let raw = this.client.client_stream(\"%{path}\", options) !>")
+                this.line("        return %{g}.TypedClientStream[%{in_t}, %{out_t}].new(raw)")
+                this.line("    }")
+            } else {
+                this.line("    %{pub_p}fn %{mname}(options: ?%{g}.CallOptions (null)) %{g}.TypedClientStream[%{in_t}, %{out_t}] !%{g}.GrpcError {")
+                this.line("        let raw = this.client.bidi_stream(\"%{path}\", options) !>")
+                this.line("        return %{g}.TypedClientStream[%{in_t}, %{out_t}].new(raw)")
+                this.line("    }")
+            }
+        }
+        this.line("}")
+        this.line()
+    }
+}
+
+fn camel_to_snake(name: String) String {
+    let out = ByteBuffer.new(name.bytes + 4)
+    let i: uint = 0
+    while i < name.bytes {
+        let c = name[i]
+        if c >= 'A' && c <= 'Z' {
+            if i > 0 {
+                let prev = name[i - 1]
+                let prev_lower = (prev >= 'a' && prev <= 'z') || (prev >= '0' && prev <= '9')
+                let next_lower = (i + 1 < name.bytes) && (name[i + 1] >= 'a' && name[i + 1] <= 'z')
+                if prev != '_' && (prev_lower || next_lower) : out.write_byte('_')
+            }
+            out.write_byte(c + 32)
+        } else {
+            out.write_byte(c)
+        }
+        i++
+    }
+    return out.into_string()
 }
 
 fn join_scope(scope: Array[String], count: uint) String {

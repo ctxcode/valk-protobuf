@@ -97,11 +97,14 @@ Or build and run the `valk-protoc` CLI:
 ```sh
 make cli
 ./valk-protoc schema.proto -o generated.valk
+./valk-protoc schema.proto --grpc -o generated.valk   # also emit valk-grpc service/client stubs
 ```
 
 Generated classes expose `encode_proto(w: protobuf.Writer)`, `to_proto_bytes() String`,
 `decode_proto(data: local &[u8]) SELF !protobuf.Error`, `decode_proto_reader`, and
-`merge_proto_reader`, and implement `protobuf.ProtoMessage`.
+`merge_proto_reader`, and implement `protobuf.ProtoMessage`. When `--grpc` (or
+`CodegenOptions { emit_grpc: true }`) is enabled, `service` blocks also generate
+`<Service>Service`, `register_<Service>_service`, and `<Service>Client` targeting `valk-grpc`.
 
 ## API Documentation
 

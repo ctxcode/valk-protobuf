@@ -245,3 +245,53 @@ message Ping {
     assert(code.contains("class Ping is pb.ProtoMessage {"))
     assert(!code.contains("+ class Ping"))
 }
+
+test "Codegen emits gRPC service interface, registrar, and client stub when emit_grpc is true" {
+    let schema = "
+syntax = \"proto3\";
+package echo.v1;
+
+message EchoRequest {
+    string text = 1;
+}
+
+message EchoReply {
+    string text = 1;
+}
+
+// Echo service
+service Echo {
+    // Unary echo
+    rpc Say(EchoRequest) returns (EchoReply);
+    rpc StreamOut(EchoRequest) returns (stream EchoReply);
+    rpc StreamIn(stream EchoRequest) returns (EchoReply);
+    rpc Chat(stream EchoRequest) returns (stream EchoReply);
+}
+"
+    let file = protobuf.parse_proto(schema) ! { assert(false) return }
+
+    // Default (emit_grpc = false) omits gRPC stubs and import
+    let default_code = protobuf.generate_valk(file)
+    assert(!default_code.contains("use grpc"))
+    assert(!default_code.contains("EchoService"))
+
+    // With emit_grpc = true
+    let code = protobuf.generate_valk(file, protobuf.CodegenOptions { emit_grpc: true })
+    assert(code.contains("use protobuf"))
+    assert(code.contains("use grpc"))
+    assert(code.contains("+ interface EchoService {"))
+    assert(code.contains("+ fn say(ctx: grpc.CallContext, req: EchoRequest) EchoReply !grpc.GrpcError;"))
+    assert(code.contains("+ fn stream_out(ctx: grpc.CallContext, req: EchoRequest, stream: grpc.TypedServerStream[EchoRequest, EchoReply]) void !grpc.GrpcError;"))
+    assert(code.contains("+ fn stream_in(stream: grpc.TypedServerStream[EchoRequest, EchoReply]) EchoReply !grpc.GrpcError;"))
+    assert(code.contains("+ fn chat(stream: grpc.TypedServerStream[EchoRequest, EchoReply]) void !grpc.GrpcError;"))
+    assert(code.contains("+ fn register_Echo_service(server: grpc.GrpcServer, service: EchoService) {"))
+    assert(code.contains("server.register_unary(\"/echo.v1.Echo/Say\""))
+    assert(code.contains("server.register_server_stream(\"/echo.v1.Echo/StreamOut\""))
+    assert(code.contains("server.register_client_stream(\"/echo.v1.Echo/StreamIn\""))
+    assert(code.contains("server.register_bidi_stream(\"/echo.v1.Echo/Chat\""))
+    assert(code.contains("+ class EchoClient {"))
+    assert(code.contains("+ fn say(req: EchoRequest, options: ?grpc.CallOptions (null)) EchoReply !grpc.GrpcError {"))
+    assert(code.contains("+ fn stream_out(req: EchoRequest, options: ?grpc.CallOptions (null)) grpc.TypedClientStream[EchoRequest, EchoReply] !grpc.GrpcError {"))
+    assert(code.contains("+ fn stream_in(options: ?grpc.CallOptions (null)) grpc.TypedClientStream[EchoRequest, EchoReply] !grpc.GrpcError {"))
+    assert(code.contains("+ fn chat(options: ?grpc.CallOptions (null)) grpc.TypedClientStream[EchoRequest, EchoReply] !grpc.GrpcError {"))
+}
