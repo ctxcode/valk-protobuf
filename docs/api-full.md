@@ -158,8 +158,12 @@ ZigZag-encodes a signed 64-bit integer (`sint64`) into an unsigned 64-bit intege
 ```js
 // Configuration options for Valk code generation from a parsed `.proto` file.
 + class CodegenOptions {
+    // Emit gRPC service interfaces, registration helpers, and client stubs for `service` blocks.
+    + emit_grpc: bool
     // Emit the standard generated-file header comment at the top of output.
     + emit_header: bool
+    // Module name imported for the gRPC runtime (`use <grpc_import>`).
+    + grpc_import: String
     // Module name imported for the protobuf runtime (`use <protobuf_import>`).
     + protobuf_import: String
     // Emit `+` public visibility modifiers on generated types, fields, and methods.
@@ -171,9 +175,17 @@ ZigZag-encodes a signed 64-bit integer (`sint64`) into an unsigned 64-bit intege
 
 Configuration options for Valk code generation from a parsed `.proto` file.
 
+#### emit_grpc
+
+Emit gRPC service interfaces, registration helpers, and client stubs for `service` blocks.
+
 #### emit_header
 
 Emit the standard generated-file header comment at the top of output.
+
+#### grpc_import
+
+Module name imported for the gRPC runtime (`use <grpc_import>`).
 
 #### protobuf_import
 

@@ -285,7 +285,7 @@ service Echo {
     assert(code.contains("+ fn stream_in(stream: grpc.TypedServerStream[EchoRequest, EchoReply]) EchoReply !grpc.GrpcError;"))
     assert(code.contains("+ fn chat(stream: grpc.TypedServerStream[EchoRequest, EchoReply]) void !grpc.GrpcError;"))
     assert(code.contains("+ fn register_Echo_service(server: grpc.GrpcServer, service: EchoService) {"))
-    assert(code.contains("server.register_unary(\"/echo.v1.Echo/Say\""))
+    assert(code.contains("server.register_unary_into(\"/echo.v1.Echo/Say\""))
     assert(code.contains("server.register_server_stream(\"/echo.v1.Echo/StreamOut\""))
     assert(code.contains("server.register_client_stream(\"/echo.v1.Echo/StreamIn\""))
     assert(code.contains("server.register_bidi_stream(\"/echo.v1.Echo/Chat\""))

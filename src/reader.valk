@@ -62,24 +62,39 @@
     ///
     /// Throws `.truncated` on premature EOF and `.varint_overflow` if the varint exceeds 64 bits.
     + fn read_varint() u64 !Error {
-        let start = this.pos
+        let len = this.source.length
+        let pos = this.pos
+        if pos < len {
+            let b0 = this.source[pos]
+            if b0 < 0x80 {
+                this.pos = pos + 1
+                return b0.to(u64)
+            }
+        }
+        let start = pos
         let result: u64 = 0
         let shift: u64 = 0
         let count: uint = 0
         while count < 10 {
-            if this.pos >= this.source.length {
-                throw .truncated("Unexpected end of input while reading varint", this.pos)
+            if pos >= len {
+                this.pos = pos
+                throw .truncated("Unexpected end of input while reading varint", pos)
             }
-            let b = this.source.get(this.pos) ! throw .truncated("Unexpected end of input while reading varint", this.pos)
-            this.pos += 1
+            let b = this.source[pos]
+            pos += 1
             if count == 9 && b > 1 {
+                this.pos = pos
                 throw .varint_overflow("Varint overflows 64 bits", start)
             }
             result = result | ((b & 0x7f).to(u64) << shift)
-            if (b & 0x80) == 0 : return result
+            if (b & 0x80) == 0 {
+                this.pos = pos
+                return result
+            }
             shift += 7
             count += 1
         }
+        this.pos = pos
         throw .varint_overflow("Varint exceeds maximum 10-byte encoding", start)
     }
 

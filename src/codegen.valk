@@ -429,6 +429,14 @@ class ValkCodegen {
         this.line("    }")
         this.line()
 
+        // decode_proto_slice (zero-copy over heap-backed slice)
+        this.line("    /// Decodes a `%{valk_name}` from a heap-backed byte slice without copying.")
+        this.line("    %{pub_p}static fn decode_proto_slice(data: &[u8]) SELF !%{pb}.Error {")
+        this.line("        let r = %{pb}.Reader.new(data)")
+        this.line("        return SELF.decode_proto_reader(r) !>")
+        this.line("    }")
+        this.line()
+
         // decode_proto
         this.line("    /// Decodes a `%{valk_name}` from Protocol Buffers wire bytes.")
         this.line("    %{pub_p}static fn decode_proto(data: local &[u8]) SELF !%{pb}.Error {")
@@ -683,6 +691,7 @@ class ValkCodegen {
 
     fn emit_service(svc: ServiceDescriptor) {
         let pub_p = this.pub_prefix()
+        let pb = this.opts.protobuf_import
         let g = this.opts.grpc_import
         let full_svc = this.file.package_name.bytes > 0 ? "%{this.file.package_name}.%{svc.name}" : svc.name
         let empty_scope = Array[String]{}
@@ -722,14 +731,15 @@ class ValkCodegen {
             let mname = escape_valk_ident(camel_to_snake(rpc.name))
             let path = "/%{full_svc}/%{rpc.name}"
             if !rpc.client_streaming && !rpc.server_streaming {
-                this.line("    server.register_unary(\"%{path}\", fn(ctx: %{g}.CallContext, raw: String) String !%{g}.GrpcError {")
-                this.line("        let req = %{in_t}.decode_proto(raw) ! throw %{g}.err(.invalid_argument, E.message)")
+                this.line("    server.register_unary_into(\"%{path}\", fn(ctx: %{g}.CallContext, raw: &[u8], out: ByteBuffer) void !%{g}.GrpcError {")
+                this.line("        let req = %{in_t}.decode_proto_slice(raw) ! throw %{g}.err(.invalid_argument, E.message)")
                 this.line("        let res = service.%{mname}(ctx, req) !>")
-                this.line("        return res.to_proto_bytes()")
+                this.line("        let w = %{pb}.Writer.to_buffer(out)")
+                this.line("        res.encode_proto(w)")
                 this.line("    })")
             } else if !rpc.client_streaming && rpc.server_streaming {
                 this.line("    server.register_server_stream(\"%{path}\", fn(ctx: %{g}.CallContext, raw: String, raw_stream: %{g}.ServerStream) void !%{g}.GrpcError {")
-                this.line("        let req = %{in_t}.decode_proto(raw) ! throw %{g}.err(.invalid_argument, E.message)")
+                this.line("        let req = %{in_t}.decode_proto_slice(raw) ! throw %{g}.err(.invalid_argument, E.message)")
                 this.line("        let stream = %{g}.TypedServerStream[%{in_t}, %{out_t}].new(raw_stream)")
                 this.line("        service.%{mname}(ctx, req, stream) !>")
                 this.line("    })")
@@ -768,7 +778,7 @@ class ValkCodegen {
             if !rpc.client_streaming && !rpc.server_streaming {
                 this.line("    %{pub_p}fn %{mname}(req: %{in_t}, options: ?%{g}.CallOptions (null)) %{out_t} !%{g}.GrpcError {")
                 this.line("        let resp = this.client.unary(\"%{path}\", req.to_proto_bytes(), options) !>")
-                this.line("        return %{out_t}.decode_proto(resp.body) ! throw %{g}.err(.internal, E.message)")
+                this.line("        return %{out_t}.decode_proto_slice(resp.body) ! throw %{g}.err(.internal, E.message)")
                 this.line("    }")
             } else if !rpc.client_streaming && rpc.server_streaming {
                 this.line("    %{pub_p}fn %{mname}(req: %{in_t}, options: ?%{g}.CallOptions (null)) %{g}.TypedClientStream[%{in_t}, %{out_t}] !%{g}.GrpcError {")
